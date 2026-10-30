@@ -597,7 +597,18 @@ BEGIN
     p_result := approve_expenditure(p_transaction_id, p_admin_user_id);
 END;
 $$;
-```
+
+CREATE OR REPLACE PROCEDURE reject_or_revert_expenditure_proc(
+    p_transaction_id INT,
+    p_admin_user_id  INT,
+    p_reason         TEXT,
+    INOUT p_result   JSONB DEFAULT NULL
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    p_result := reject_or_revert_expenditure(p_transaction_id, p_admin_user_id, p_reason);
+END;
+$$;
 ```
 
 ---
@@ -960,4 +971,3 @@ WHERE f.faculty_id IN (
 ORDER BY f.full_name ASC;
 ```
 *Expected seed data return*: Query 7a returns newly appointed faculty without disclosures; Query 7b returns faculty actively directing sanctioned research projects.
-```

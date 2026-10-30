@@ -2,7 +2,7 @@
 
 ## 1. Database Paradigm Choice: PostgreSQL with pgvector
 
-For the database requirement, we chose **Option 2** (Relational SQL + Vector Database). Rather than running a separate standalone vector database (such as Pinecone, Qdrant, or Chroma), we store and index vector embeddings directly inside **PostgreSQL 16 using the official `pgvector` extension** pinned to Docker image `pgvector/pgvector:0.7.0-pg16` (hosted on port 5433). The Node.js application environment is pinned via a repository `.nvmrc` file (targeting Node LTS `v20.x`).
+For the database requirement, we chose **Option 2** (Relational SQL + Vector Database). Rather than running a separate standalone vector database (such as Pinecone, Qdrant, or Chroma), we store and index vector embeddings directly inside **PostgreSQL 16 using the official `pgvector` extension** pinned to Docker image `pgvector/pgvector:0.8.0-pg16` (hosted on port 5433). The project uses the Node major version installed on the team machines (Node v26), pinned through `.nvmrc` and `package.json` engines (`>=22`).
 
 We chose this setup for several reasons:
 
@@ -89,11 +89,14 @@ WITH (m = 16, ef_construction = 64);
 
 - `m = 16`: Number of bidirectional connections per graph node.
 - `ef_construction = 64`: Size of the dynamic candidate list evaluated during index construction.
-- **`hnsw.ef_search` Limit Behavior**: In PostgreSQL with `pgvector`, an HNSW index scan returns at most `hnsw.ef_search` candidates (which defaults to 40). When performing over-fetching queries (e.g. inner `LIMIT 50`), `hnsw.ef_search` must be set to at least the inner limit value within the transaction or session:
-  ```sql
-  SET LOCAL hnsw.ef_search = 100;
+- **`hnsw.ef_search` Limit Behavior**: In PostgreSQL with `pgvector`, an HNSW index scan returns at most `hnsw.ef_search` candidates (which defaults to 40). `ef_search` must be greater than or equal to the inner `LIMIT` (the default is 40, so an inner `LIMIT` of 50 would silently return only 40 candidates). Because `SET LOCAL` only functions inside a transaction and parameterized database queries cannot combine multiple statements in one call, vector searches with custom `ef_search` are executed as separate calls on one connection:
+  ```typescript
+  await client.query('BEGIN');
+  await client.query("SELECT set_config('hnsw.ef_search', '100', true)");
+  const res = await client.query(searchQuery, [vector, dept, docType]);
+  await client.query('COMMIT');
   ```
-  In `pgvector` 0.7+, iterative index scanning (`SET hnsw.iterative_scan = 'relaxed'`) is also available as an alternative to automatically continue scanning until the target `LIMIT` is satisfied.
+  In `pgvector` 0.8.0 or newer, iterative index scanning (`SET hnsw.iterative_scan = 'relaxed'`) is also available as an alternative to automatically continue scanning until the target `LIMIT` is satisfied.
 
 *Testing Note on Query Planner*: On small seed or test datasets (such as fewer than a few hundred rows), PostgreSQL's cost-based query planner will typically choose a sequential scan over the HNSW index because reading a few disk pages sequentially has lower estimated cost than traversing index graphs. To verify that the HNSW index is active and working during testing, run `SET enable_seqscan = off;` before `EXPLAIN ANALYZE`.
 
@@ -107,8 +110,8 @@ To ensure that PostgreSQL uses the HNSW index effectively while allowing relatio
 3. **Stage 3: Outer Joins & Aggregation**: Joins only the filtered top-5 candidates with `ip_author`, `faculty`, `department`, `grant_ip`, and `grant_record`, aggregating all co-authors and funding grants into structured JSON without data truncation.
 
 ```sql
--- Ensure hnsw.ef_search is larger than the inner over-fetch limit
-SET LOCAL hnsw.ef_search = 100;
+-- Executed inside a single-connection transaction after setting hnsw.ef_search:
+-- BEGIN; SELECT set_config('hnsw.ef_search', '100', true); ...; COMMIT;
 
 WITH nearest_candidates AS (
     -- Stage 1: Fast HNSW index scan returning candidate document IDs and distance
@@ -121,27 +124,22 @@ WITH nearest_candidates AS (
     LIMIT 50
 ),
 filtered_candidates AS (
-    -- Stage 2: Middle CTE applying relational filters via EXISTS before expanding joins
+    -- Stage 2: Middle CTE applying relational filters before expanding joins
     SELECT 
         nc.document_id,
         nc.cosine_dist
     FROM nearest_candidates nc
-    WHERE EXISTS (
-        -- Optional filter: e.g. target department code ($2)
+    JOIN intellectual_property ip ON nc.document_id = ip.document_id
+    WHERE ($2::text IS NULL OR EXISTS (
+        -- Optional filter: target department code ($2)
         SELECT 1 
         FROM ip_author ipa
         JOIN faculty f ON ipa.faculty_id = f.faculty_id
         JOIN department d ON f.department_id = d.department_id
         WHERE ipa.document_id = nc.document_id
-          AND ($2::text IS NULL OR d.department_code = $2::text)
-    )
-    AND EXISTS (
-        -- Optional filter: e.g. document type ($3)
-        SELECT 1 
-        FROM intellectual_property ip
-        WHERE ip.document_id = nc.document_id
-          AND ($3::text IS NULL OR ip.doc_type = $3::text)
-    )
+          AND d.department_code = $2::text
+    ))
+    AND ($3::text IS NULL OR ip.doc_type = $3::text)
     ORDER BY nc.cosine_dist ASC
     LIMIT 5
 )

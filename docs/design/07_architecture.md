@@ -4,8 +4,8 @@
 
 The system uses a 3-tier architecture integrating modern web technologies with PostgreSQL 16 and `pgvector`:
 - **Presentation Tier**: Next.js 14+ (App Router) delivering server-side rendered pages and interactive client components.
-- **Application & API Tier**: Next.js Route Handlers in TypeScript, handling authentication, role-based authorization guards, input validation, and local vector embeddings via `@huggingface/transformers`. Node.js runtime version is pinned via repository `.nvmrc`.
-- **Data & Vector Storage Tier**: Containerized PostgreSQL 16 on port 5433 using Docker image `pgvector/pgvector:0.7.0-pg16` with native `pgvector` and full-text search extensions. Connections from the API and test suites operate under a restricted database role `app_user` (granted `SELECT`/`INSERT`/`UPDATE`/`DELETE` on operational tables, `SELECT`/`INSERT` only on `audit_log`, and denied `TRUNCATE` and `TRIGGER` rights).
+- **Application & API Tier**: Next.js Route Handlers in TypeScript, handling authentication, role-based authorization guards, input validation, and local vector embeddings via `@huggingface/transformers`. The project uses the Node major version installed on the team machines (Node v26), pinned through `.nvmrc` and `package.json` engines (`>=22`).
+- **Data & Vector Storage Tier**: Containerized PostgreSQL 16 on port 5433 using Docker image `pgvector/pgvector:0.8.0-pg16` with native `pgvector` and full-text search extensions. Connections from the API and test suites operate under a restricted database role `app_user` (granted `SELECT`/`INSERT`/`UPDATE`/`DELETE` on operational tables, `SELECT`/`INSERT` only on `audit_log`, and denied `TRUNCATE` and `TRIGGER` rights).
 
 ```mermaid
 graph TD
@@ -267,3 +267,6 @@ Our test strategy incorporates three distinct levels of verification:
 - **E2E-02 (Faculty Expense Lifecycle)**: Faculty logs in -> Views allocated grant accounts -> Submits INR 45,000 Equipment expense -> Verifies status is `PENDING`.
 - **E2E-03 (Approval & Audit Lifecycle)**: Admin opens approval dashboard -> Approves pending expense -> Verifies balance deducted -> Inspects Audit Log table.
 - **E2E-04 (Prior-Art Clearance)**: Faculty pastes patent draft disclosure -> Clicks "Analyze Prior Art" -> Inspects top similar institutional disclosures with similarity scores and author affiliations.
+
+### 4.7 Note on Test Data and Seed Seeding Strategy
+Because the submission trigger (`fn_validate_expenditure_submission`) strictly forces all newly created expenditures to have `status = 'PENDING'` with NULL approval fields, test suites and database seed scripts cannot directly insert rows with `APPROVED` or `REJECTED` status. Instead, seeded or test expenditures that represent decided states must be inserted as `PENDING` and then transitioned programmatically through the sanctioned routines (`approve_expenditure` or `reject_or_revert_expenditure`), ensuring that balance deductions, restorations, and audit logs are triggered authentically.
