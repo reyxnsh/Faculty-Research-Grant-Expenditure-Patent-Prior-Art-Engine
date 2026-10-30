@@ -3,48 +3,48 @@
 ## 1. Schema Overview & Design Principles
 
 The relational schema is designed for PostgreSQL 16 with the `pgvector` extension. The schema prioritizes:
-1. **Declarative Integrity**: Enforcing domain constraints at the database level via `NOT NULL`, `CHECK`, and `UNIQUE` constraints.
-2. **Referential Integrity**: Implementing appropriate `ON DELETE` and `ON UPDATE` actions to prevent orphaned records or unintended cascading deletes of critical financial data.
-3. **Rigorous Normalization**: Ensuring all tables adhere to Third Normal Form (3NF), with one deliberate, fully isolated denormalization (`current_balance`) governed by database triggers.
+1. **Declarative Integrity**: Enforcing domain rules at the database level via `NOT NULL`, `CHECK`, and `UNIQUE` constraints.
+2. **Referential Integrity**: Using explicit `ON DELETE RESTRICT` on core business and user relationships so records cannot be accidentally deleted when dependent financial and audit history exists. User accounts are deactivated via `is_active` rather than deleted.
+3. **Third Normal Form (3NF)**: Normalizing all entities into 3NF, with one intentional, trigger-maintained denormalization (`current_balance`) on `grant_account`.
 
 ---
 
 ## 2. Normalization Analysis
 
 ### 2.1 First Normal Form (1NF)
-- **Criterion**: Every column contains only atomic (indivisible) values; each record has a unique primary key; no repeating groups.
+- **Criterion**: Every column contains only atomic (indivisible) values, each record has a unique primary key, and there are no repeating groups.
 - **Application**:
-  - All multi-valued relationships (co-authorship, multi-grant funding) are factored into dedicated relation tables (`IP_AUTHOR`, `GRANT_IP`) rather than comma-separated strings or arrays.
-  - Address/contact information and financial values are atomic.
+  - Multi-valued attributes such as co-authorship and multi-grant funding are stored in separate junction tables (`ip_author`, `grant_ip`).
+  - Contact information, dates, and amounts are stored as atomic fields.
   - Status and category fields are scalar strings constrained by explicit `CHECK` enums.
 
 ### 2.2 Second Normal Form (2NF)
-- **Criterion**: The relation is in 1NF and every non-prime attribute is fully functionally dependent on the entire primary key (no partial key dependencies).
+- **Criterion**: The table is in 1NF and all non-key attributes depend on the entire primary key (no partial key dependencies).
 - **Application**:
-  - In single-column primary key tables (`DEPARTMENT`, `FACULTY`, `USERS`, `GRANT`, `GRANT_ACCOUNT`, `EXPENDITURE`, `INTELLECTUAL_PROPERTY`, `AUDIT_LOG`), partial dependencies are mathematically impossible.
+  - In single-column primary key tables (`department`, `faculty`, `users`, `grant_record`, `grant_account`, `expenditure`, `intellectual_property`, `audit_log`), partial key dependencies cannot occur because the primary key contains only one column.
   - In composite primary key tables:
-    - In `IP_AUTHOR (document_id, faculty_id)`, the attributes `author_order` and `is_corresponding` depend on both the specific publication and the specific faculty member, not on either attribute alone.
-    - In `GRANT_IP (grant_id, document_id)`, the attribute `contribution_details` depends jointly on the grant and the document.
-  - Hence, all relations satisfy 2NF.
+    - In `ip_author (document_id, faculty_id)`, `author_order` and `is_corresponding` describe the specific relationship between that paper and that faculty member.
+    - In `grant_ip (grant_id, document_id)`, `contribution_details` describes how that specific grant funded that specific paper.
+  - Therefore, all tables satisfy 2NF.
 
 ### 2.3 Third Normal Form (3NF)
-- **Criterion**: The relation is in 2NF and there are no transitive dependencies (no non-prime attribute depends on another non-prime attribute; $X \rightarrow Y \implies X$ is a superkey or $Y$ is a prime attribute).
+- **Criterion**: The table is in 2NF and there are no transitive dependencies (no non-key attribute depends on another non-key attribute).
 - **Application**:
-  - `FACULTY`: Contains `department_id`, while `department_name` remains exclusively in `DEPARTMENT`. No transitive dependency exists.
-  - `GRANT`: Contains `pi_faculty_id`. Faculty details (`full_name`, `email`) remain in `FACULTY`.
-  - `EXPENDITURE`: Stores `account_id`, `submitted_by`, and `approved_by`. Grant details are resolved by joining `GRANT_ACCOUNT \rightarrow GRANT` rather than redundantly storing `grant_id` in `EXPENDITURE`.
+  - `faculty`: References `department_id`. The department name remains in `department`.
+  - `grant_record`: References `pi_faculty_id`. Faculty details remain in `faculty`.
+  - `expenditure`: References `account_id`, `submitted_by`, and `approved_by`. Grant details are resolved through the foreign key from `grant_account` to `grant_record` rather than duplicating `grant_id` in `expenditure`.
 
 ### 2.4 Intentional Denormalization Justification: `current_balance`
-- **Location**: `GRANT_ACCOUNT.current_balance`
-- **Theoretical Normalized Alternative**: In strict 3NF, the available balance is a derived calculation:
-  $$\text{Current Balance} = \text{budget\_allocated} - \sum_{\text{status} = \text{'APPROVED'}} \text{expenditure.amount}$$
-- **Why Denormalized**:
-  1. **High-Frequency Concurrency**: Expenditure approval workflows require checking if an account has sufficient balance before accepting an expense. Computing an on-the-fly aggregate (`SUM(amount)`) across thousands of historical transactions locks the entire expenditure table or forces repeatable read isolation with high serialization failure rates.
-  2. **Row-Level Pessimistic Locking**: Maintaining `current_balance` as a concrete column enables PostgreSQL row-level locks via `SELECT ... FOR UPDATE` directly on the `GRANT_ACCOUNT` row. This serializes approvals for that specific account without blocking other accounts or grants.
-- **Consistency Guarantee**:
-  - Applications and users are prohibited from executing direct `UPDATE` queries on `current_balance`.
-  - The balance is updated exclusively by database triggers and stored procedures (`approve_expenditure`, `reject_expenditure`) running within atomic transactions.
-  - Database-level `CHECK (current_balance >= 0)` and `CHECK (current_balance <= budget_allocated)` guarantee that balance corruption is impossible.
+- **Location**: `grant_account.current_balance`
+- **Normalized Alternative**: In pure 3NF, the available balance is calculated dynamically:
+  `budget_allocated - (sum of amount where status = 'APPROVED')`
+- **Why We Denormalize**:
+  1. **Avoiding full history aggregation on every approval**: An account may accumulate hundreds of historical expenditures over a multi-year grant. Re-summing every past approved transaction each time a new expenditure is submitted or checked adds unnecessary query overhead.
+  2. **Row-level locking**: Storing `current_balance` on the `grant_account` row gives us a single row to lock using `SELECT ... FOR UPDATE`. This serializes approvals for that specific account and prevents two concurrent approvals from overdrawing the balance.
+  3. **Direct CHECK constraint**: Having the column directly on `grant_account` allows us to add `CHECK (current_balance >= 0 AND current_balance <= budget_allocated)`, giving us an automatic safety check enforced by PostgreSQL.
+- **Integrity Protection**:
+  - Direct updates to `current_balance` are rejected by a database trigger unless the change originates from inside another trigger (`pg_trigger_depth() > 1`).
+  - Balance updates happen only when an expenditure transitions to `APPROVED` (deducting the amount) or from `APPROVED` to `REJECTED` (restoring the amount).
 
 ---
 
@@ -56,7 +56,6 @@ The following SQL statements define the complete database schema.
 -- ============================================================================
 -- EXTENSIONS
 -- ============================================================================
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector";
 
 -- ============================================================================
@@ -105,11 +104,12 @@ CREATE TABLE users (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT uq_user_email UNIQUE (email),
+    CONSTRAINT uq_user_faculty UNIQUE (faculty_id),
     CONSTRAINT chk_user_role CHECK (role IN ('ADMIN', 'FACULTY')),
     CONSTRAINT fk_user_faculty 
         FOREIGN KEY (faculty_id) 
         REFERENCES faculty (faculty_id) 
-        ON DELETE SET NULL 
+        ON DELETE RESTRICT 
         ON UPDATE CASCADE,
     CONSTRAINT chk_faculty_role_link CHECK (
         (role = 'FACULTY' AND faculty_id IS NOT NULL) OR
@@ -189,6 +189,11 @@ CREATE TABLE expenditure (
 
     CONSTRAINT chk_expenditure_amount_positive CHECK (amount > 0),
     CONSTRAINT chk_expenditure_status CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    CONSTRAINT chk_expenditure_state CHECK (
+        (status = 'PENDING' AND approved_by IS NULL AND decision_date IS NULL) OR
+        (status = 'APPROVED' AND approved_by IS NOT NULL AND decision_date IS NOT NULL) OR
+        (status = 'REJECTED' AND decision_date IS NOT NULL AND rejection_reason IS NOT NULL)
+    ),
     CONSTRAINT fk_expenditure_account 
         FOREIGN KEY (account_id) 
         REFERENCES grant_account (account_id) 
@@ -202,7 +207,7 @@ CREATE TABLE expenditure (
     CONSTRAINT fk_expenditure_approver 
         FOREIGN KEY (approved_by) 
         REFERENCES users (user_id) 
-        ON DELETE SET NULL 
+        ON DELETE RESTRICT 
         ON UPDATE CASCADE
 );
 
@@ -288,7 +293,7 @@ CREATE TABLE audit_log (
     CONSTRAINT fk_audit_user 
         FOREIGN KEY (changed_by) 
         REFERENCES users (user_id) 
-        ON DELETE SET NULL 
+        ON DELETE RESTRICT 
         ON UPDATE CASCADE
 );
 ```

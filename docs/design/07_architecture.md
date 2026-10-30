@@ -2,9 +2,9 @@
 
 ## 1. System Architecture Overview
 
-The system employs a 3-tier architecture integrating modern web technologies with PostgreSQL 16 and `pgvector`:
+The system uses a 3-tier architecture integrating modern web technologies with PostgreSQL 16 and `pgvector`:
 - **Presentation Tier**: Next.js 14+ (App Router) delivering server-side rendered pages and interactive client components.
-- **Application & API Tier**: Next.js Route Handlers in TypeScript, handling authentication, role-based authorization guards, input validation, and local vector embeddings via Transformers.js.
+- **Application & API Tier**: Next.js Route Handlers in TypeScript, handling authentication, role-based authorization guards, input validation, and local vector embeddings via `@huggingface/transformers`.
 - **Data & Vector Storage Tier**: Containerized PostgreSQL 16 on port 5433 with native `pgvector` and full-text search extensions.
 
 ```mermaid
@@ -27,7 +27,7 @@ graph TD
         end
 
         subgraph AI_Engine ["In-Process Vector Pipeline"]
-            ModelLoader["Transformers.js (all-MiniLM-L6-v2)"]
+            ModelLoader["@huggingface/transformers (all-MiniLM-L6-v2)"]
             VectorInference["384-Dim Vector Inference Engine"]
         end
 
@@ -49,10 +49,10 @@ graph TD
         end
 
         subgraph DBLogic ["Database Automation & Indexing"]
-            Triggers["Triggers: Budget Ceiling, Balance Maintenance, Audit, FTS"]
-            Procedures["Stored Procedures: approve_expenditure(), reject_expenditure()"]
+            Triggers["Triggers: Budget Ceiling, Balance Guard, Audit, FTS"]
+            Procedures["Stored Procedures: approve_expenditure(), reject_or_revert_expenditure()"]
             Indexes["B-Tree Indexes, GIN (Full-Text), HNSW (Vector Cosine Ops)"]
-            Views["Views: v_grant_financial_summary, v_department_overview"]
+            Views["Views: v_grant_financial_summary, v_department_expenditure_overview"]
         end
     end
 
@@ -72,17 +72,17 @@ graph TD
 
 ---
 
-## 2. Proposed Repository Directory Structure
+## 2. Repository Directory Structure
 
 ```
 Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
-├── .env.example                       # Committed template for runtime configuration
-├── .gitignore                         # Comprehensive ignore list
-├── docker-compose.yml                 # Docker service for PostgreSQL 16 + pgvector
-├── package.json                       # Dependencies, scripts, and tooling config
-├── tsconfig.json                      # Strict TypeScript compiler options
-├── next.config.mjs                    # Next.js framework configuration
-├── tailwind.config.ts                 # Styling design tokens
+├── .env.example                       # Template for environment configuration
+├── .gitignore                         # Git ignore configuration
+├── docker-compose.yml                 # PostgreSQL 16 + pgvector service config
+├── package.json                       # Project scripts and dependencies
+├── tsconfig.json                      # TypeScript configuration
+├── next.config.mjs                    # Next.js configuration
+├── tailwind.config.ts                 # Tailwind styling config
 ├── docs/
 │   └── design/                        # System and database design specifications
 │       ├── 01_objectives_and_requirements.md
@@ -93,13 +93,13 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 │       ├── 06_vector_design.md
 │       └── 07_architecture.md
 ├── sql/
-│   ├── migrations/                    # Sequential DDL and schema migrations
+│   ├── migrations/                    # Database DDL migration scripts
 │   │   ├── 001_initial_schema.sql
 │   │   ├── 002_triggers_and_procedures.sql
 │   │   ├── 003_views_and_indexes.sql
 │   │   └── 004_full_text_search.sql
 │   └── seeds/
-│       └── seed_data.sql              # Realistic university research dataset
+│       └── seed_data.sql              # University research seed dataset
 ├── src/
 │   ├── app/                           # Next.js App Router pages and APIs
 │   │   ├── api/                       # Backend Route Handlers
@@ -122,9 +122,9 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 │   │   │   └── reports/
 │   │   │       ├── financial-summary/route.ts
 │   │   │       └── department-overview/route.ts
-│   │   ├── (auth)/                    # Authentication route groups
+│   │   ├── (auth)/                    # Login route group
 │   │   │   └── login/page.tsx
-│   │   ├── (dashboard)/               # Protected application pages
+│   │   ├── (dashboard)/               # Role-protected pages
 │   │   │   ├── admin/
 │   │   │   │   ├── grants/page.tsx
 │   │   │   │   ├── approvals/page.tsx
@@ -135,20 +135,20 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 │   │   │   └── prior-art/page.tsx
 │   │   ├── layout.tsx
 │   │   └── page.tsx                   # Landing page
-│   ├── components/                    # Reusable React UI components
+│   ├── components/                    # React UI components
 │   │   ├── ui/                        # Buttons, modals, tables, badges
-│   │   ├── forms/                     # Expenditure, grant, and search forms
-│   │   └── charts/                    # Spend and utilization visualizations
-│   ├── lib/                           # Core utilities and business services
+│   │   ├── forms/                     # Form components
+│   │   └── charts/                    # Spending visualizations
+│   ├── lib/                           # Core utilities
 │   │   ├── db/
-│   │   │   ├── client.ts              # PostgreSQL pooled connection client
-│   │   │   └── queries.ts             # Centralized parameterized SQL queries
+│   │   │   ├── client.ts              # PostgreSQL pooled client
+│   │   │   └── queries.ts             # Parameterized SQL queries
 │   │   ├── auth/
-│   │   │   ├── session.ts             # JWT signing and cookie management
-│   │   │   └── passwords.ts           # Password hashing and verification
+│   │   │   ├── session.ts             # Session / JWT helpers
+│   │   │   └── passwords.ts           # Password hashing
 │   │   └── vector/
-│   │       └── embedder.ts            # Local Transformers.js pipeline wrapper
-│   └── types/                         # TypeScript domain interfaces
+│   │       └── embedder.ts            # @huggingface/transformers wrapper
+│   └── types/                         # TypeScript interfaces
 │       └── db.ts
 └── tests/
     ├── db/                            # Vitest database constraint & trigger tests
@@ -179,22 +179,22 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 | `POST` | `/api/grants` | ADMIN | Creates a new research grant record. | `{ grant_code, title, agency, pi_id, budget, start, end }` | `201 Created` `{ grant_id, ... }` |
 | `GET` | `/api/grants/[id]` | ADMIN, FACULTY | Fetches grant details and line-item accounts. | Path: `id` | `200 OK` `{ grant: { ... }, accounts: [ ... ] }` |
 | `POST` | `/api/grants/[id]/accounts` | ADMIN | Allocates budget head account under grant. | `{ category, budget_allocated }` | `201 Created` `{ account_id, ... }` |
-| `GET` | `/api/expenditures` | ADMIN, FACULTY | Lists expenditures. `ADMIN` sees all university claims; `FACULTY` sees own. | Query: `?status=PENDING&grant_id=1` | `200 OK` `[ { transaction_id, amount, status, ... } ]` |
+| `GET` | `/api/expenditures` | ADMIN, FACULTY | Lists expenditures. `ADMIN` sees all claims; `FACULTY` sees own. | Query: `?status=PENDING&grant_id=1` | `200 OK` `[ { transaction_id, amount, status, ... } ]` |
 | `POST` | `/api/expenditures` | FACULTY | Submits a new expenditure claim against an account. | `{ account_id, amount, description, invoice_ref, date }` | `201 Created` `{ transaction_id, status: "PENDING" }` |
-| `POST` | `/api/expenditures/[id]/approve` | ADMIN | Atomically approves claim and deducts balance. | None | `200 OK` `{ transaction_id, status: "APPROVED", remaining_balance }` |
-| `POST` | `/api/expenditures/[id]/reject` | ADMIN | Rejects pending claim or reverts approved claim. | `{ reason }` | `200 OK` `{ transaction_id, status: "REJECTED" }` |
-| `POST` | `/api/prior-art/search` | ADMIN, FACULTY | Embeds draft abstract text and returns ranked prior art. | `{ text, limit, doc_type, threshold }` | `200 OK` `[ { document_id, title, similarity_score, authors, grants } ]` |
+| `POST` | `/api/expenditures/[id]/approve` | ADMIN | Calls `approve_expenditure()` to approve claim. | None | `200 OK` `{ transaction_id, status: "APPROVED", remaining_balance }` |
+| `POST` | `/api/expenditures/[id]/reject` | ADMIN | Calls `reject_or_revert_expenditure()` to reject/revert claim. | `{ reason }` | `200 OK` `{ transaction_id, status: "REJECTED" }` |
+| `POST` | `/api/prior-art/search` | ADMIN, FACULTY | Embeds draft text and returns ranked prior art. | `{ text, limit, doc_type }` | `200 OK` `[ { document_id, title, similarity_score, authors, grants } ]` |
 | `GET` | `/api/reports/financial-summary` | ADMIN | Returns aggregated grant utilization view. | Query: `?agency=DST` | `200 OK` `[ { grant_code, sanctioned, spent, ... } ]` |
-| `GET` | `/api/reports/department-overview` | ADMIN | Returns department-wide research spend metrics. | None | `200 OK` `[ { department_code, total_sanctioned, total_spent } ]` |
+| `GET` | `/api/reports/department-overview` | ADMIN | Returns department-level spend overview. | None | `200 OK` `[ { department_code, total_sanctioned, total_spent } ]` |
 
 ---
 
 ## 4. Test Strategy and Verification Case Suite
 
 Our test strategy incorporates three distinct levels of verification:
-1. **Database Constraint & Logic Tests** (direct SQL / Vitest)
-2. **API & Authorization Tests** (Route Handlers / Vitest)
-3. **End-to-End System Tests** (Playwright)
+1. **Database Constraint & Logic Tests** (Vitest running direct SQL against PostgreSQL on port 5433)
+2. **API & Authorization Tests** (Vitest testing Route Handlers and middleware)
+3. **End-to-End System Tests** (Playwright testing full browser flows)
 
 ### 4.1 Database Constraint Tests (`tests/db/constraints.test.ts`)
 - **TC-DB-01**: Negative grant budget rejection (`CHECK (total_budget > 0)`).
@@ -203,20 +203,39 @@ Our test strategy incorporates three distinct levels of verification:
 - **TC-DB-04**: Account balance constraint rejection when `current_balance > budget_allocated` or `current_balance < 0`.
 - **TC-DB-05**: Duplicate email rejection in `users` and `faculty` tables.
 - **TC-DB-06**: Foreign key deletion rejection on `department` when referenced by `faculty` (`ON DELETE RESTRICT`).
+- **TC-DB-07**: Foreign key deletion rejection on `faculty` when referenced by `users` (`ON DELETE RESTRICT`).
+- **TC-DB-08**: State constraint validation on `expenditure`:
+  - `PENDING` with non-null `approved_by` or `decision_date` is rejected.
+  - `APPROVED` with null `approved_by` or null `decision_date` is rejected.
+  - `REJECTED` with null `decision_date` or null `rejection_reason` is rejected.
 
-### 4.2 Database Trigger & Automation Tests (`tests/db/triggers.test.ts`)
-- **TC-TRG-01**: Allocation ceiling trigger rejects when `SUM(budget_allocated) > grant_record.total_budget`.
-- **TC-TRG-02**: Submitting an expenditure against a `CLOSED` or `SUSPENDED` grant is rejected by the pre-validation trigger.
-- **TC-TRG-03**: Submitting an expenditure with a transaction date outside the grant's active lifespan is rejected.
-- **TC-TRG-04**: Non-PI faculty submitting expenditure against another faculty's grant is rejected.
-- **TC-TRG-05**: Successful expenditure status update fires the audit trigger and generates a new record in `audit_log` with correct old and new state JSON.
-- **TC-TRG-06**: Inserting an intellectual property disclosure auto-populates `tsv` with weighted title and abstract lexemes.
+### 4.2 Database Trigger & Integrity Tests (`tests/db/triggers.test.ts`)
+- **TC-TRG-01 (Budget Ceiling)**: Allocation ceiling trigger rejects when `SUM(budget_allocated) > grant_record.total_budget`.
+- **TC-TRG-02 (Budget Reduction Guard)**: Reducing `grant_record.total_budget` below the sum of allocated accounts is rejected.
+- **TC-TRG-03 (Direct Balance Update Guard)**: Direct `UPDATE grant_account SET current_balance = ...` from an application query is rejected.
+- **TC-TRG-04 (Account Insert Balance Initialization)**: Inserting a `grant_account` with an arbitrary `current_balance` ignores that value and sets `current_balance = budget_allocated`.
+- **TC-TRG-05 (Allocation Shift Balance Adjustment)**: Updating `budget_allocated` on a `grant_account` adjusts `current_balance` by the exact delta, and raises an error if the balance would drop below zero.
+- **TC-TRG-06 (Immutable Account ID)**: Attempting to `UPDATE expenditure SET account_id = ...` is rejected.
+- **TC-TRG-07 (Amount Edit in Pending Only)**: Attempting to `UPDATE expenditure SET amount = ...` on an `APPROVED` or `REJECTED` expenditure is rejected.
+- **TC-TRG-08 (Illegal Status Transitions)**:
+  - `REJECTED -> APPROVED` is rejected.
+  - `REJECTED -> PENDING` is rejected.
+  - `APPROVED -> PENDING` is rejected.
+- **TC-TRG-09 (Direct Status Update Maintains Balance)**: Running a direct `UPDATE expenditure SET status = 'APPROVED', approved_by = 1, decision_date = NOW() WHERE transaction_id = ...` deducts the balance from `grant_account` through the AFTER UPDATE trigger.
+- **TC-TRG-10 (Reversion Restores Balance)**: Transitioning an expenditure from `APPROVED` to `REJECTED` restores the exact amount to `grant_account.current_balance`.
+- **TC-TRG-11 (Inactive Grant Submissions)**: Submitting an expenditure against a `CLOSED` or `SUSPENDED` grant is rejected.
+- **TC-TRG-12 (Date Lifespan Validation)**: Submitting an expenditure outside the grant active dates is rejected.
+- **TC-TRG-13 (Non-PI Submission)**: Non-PI faculty submitting expenditure against another faculty's grant is rejected.
+- **TC-TRG-14 (Audit Log Immutability)**: Any `UPDATE` or `DELETE` statement against `audit_log` is rejected with an exception.
+- **TC-TRG-15 (Audit Log Submission Tracking)**: Inserting an expenditure creates a `CREATED` audit entry with the submitting faculty's user ID recorded in `changed_by`.
+- **TC-TRG-16 (FTS Synchronization)**: Inserting an intellectual property disclosure auto-populates `tsv` with weighted title and abstract lexemes.
 
 ### 4.3 Transaction & Concurrency Tests (`tests/db/transactions.test.ts`)
-- **TC-TX-01**: Atomic approval decreases `grant_account.current_balance` by exact expenditure amount.
+- **TC-TX-01**: Atomic approval decreases `grant_account.current_balance` by the exact expenditure amount.
 - **TC-TX-02**: Attempting to approve an expenditure exceeding available `current_balance` raises an exception and cleanly rolls back the transaction.
-- **TC-TX-03**: Concurrent approval race condition test: two concurrent approvals whose combined sum exceeds balance result in exactly one successful approval and one serialized rollback.
-- **TC-TX-04**: Reverting an approved expenditure restores the exact deducted amount to `current_balance`.
+- **TC-TX-03 (Concurrent Overdraw Protection)**: Two concurrent approvals on the same account whose combined sum exceeds the available balance result in exactly one approval succeeding and one being cleanly rejected.
+- **TC-TX-04 (Concurrent Account Allocations)**: Two concurrent `INSERT` operations into `grant_account` under the same grant whose combined budget exceeds `total_budget` result in one transaction succeeding and one being rejected due to the `SELECT ... FOR UPDATE` lock on the grant.
+- **TC-TX-05**: Reverting an approved expenditure restores the exact deducted amount to `current_balance`.
 
 ### 4.4 Authentication & RBAC Tests (`tests/api/auth.test.ts`)
 - **TC-AUTH-01**: Unauthenticated request to `/api/expenditures` returns HTTP `401 Unauthorized`.
@@ -225,13 +244,14 @@ Our test strategy incorporates three distinct levels of verification:
 - **TC-AUTH-04**: Admin user requesting `/api/grants` receives all grants across all departments.
 
 ### 4.5 Vector Semantic Ranking Tests (`tests/api/vector_search.test.ts`)
-- **TC-VEC-01**: Dense embedding generation produces an array of exactly 384 floating-point elements.
-- **TC-VEC-02**: Semantic ranking test: A query on *"quantum cryptography key distribution"* ranks quantum photonics disclosures significantly higher than unrelated *"composite polymer synthesis"* disclosures.
-- **TC-VEC-03**: Cosine distance calculation in SQL matches calculated dot product of normalized test vectors.
-- **TC-VEC-04**: Relational metadata join returns authors, departments, and linked grant codes within the search response.
+- **TC-VEC-01**: Embedding generation produces an array of exactly 384 numbers.
+- **TC-VEC-02**: Semantic ranking test: A query on *"quantum cryptography key distribution"* ranks quantum physics disclosures higher than unrelated *"composite polymer synthesis"* disclosures.
+- **TC-VEC-03**: Cosine distance in SQL matches calculated dot product of normalized test vectors.
+- **TC-VEC-04**: Relational metadata join returns co-authors, departments, and linked grant codes in the search response.
+- **TC-VEC-05**: Hybrid search query returns documents matching either semantic meaning or keyword lexemes.
 
 ### 4.6 End-to-End User Flow Tests (`tests/e2e/workflow.spec.ts`)
-- **E2E-01 (Admin Lifecycle)**: Admin logs in -> Creates Department -> Creates Faculty -> Provisions Grant -> Allocates Category Accounts -> Views Financial Summary.
+- **E2E-01 (Admin Lifecycle)**: Admin logs in -> Creates Department -> Creates Faculty -> Creates Grant -> Allocates Category Accounts -> Views Financial Summary.
 - **E2E-02 (Faculty Expense Lifecycle)**: Faculty logs in -> Views allocated grant accounts -> Submits INR 45,000 Equipment expense -> Verifies status is `PENDING`.
 - **E2E-03 (Approval & Audit Lifecycle)**: Admin opens approval dashboard -> Approves pending expense -> Verifies balance deducted -> Inspects Audit Log table.
-- **E2E-04 (Prior-Art Clearance)**: Faculty pastes patent draft disclosure -> Clicks "Analyze Prior Art" -> Inspects top 3 similar institutional disclosures with similarity scores and author affiliations.
+- **E2E-04 (Prior-Art Clearance)**: Faculty pastes patent draft disclosure -> Clicks "Analyze Prior Art" -> Inspects top similar institutional disclosures with similarity scores and author affiliations.

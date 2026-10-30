@@ -31,14 +31,8 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Defensive entries for IDEs and environment tools
+# IDE configuration
 .vscode/
 .idea/
 *.swp
 *.swo
-.agent/
-.agents/
-.gemini/
-.antigravity/
-.cursor/
-.claude/
