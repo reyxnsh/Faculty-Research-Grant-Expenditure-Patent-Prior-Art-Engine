@@ -4,8 +4,8 @@
 
 The system uses a 3-tier architecture integrating modern web technologies with PostgreSQL 16 and `pgvector`:
 - **Presentation Tier**: Next.js 14+ (App Router) delivering server-side rendered pages and interactive client components.
-- **Application & API Tier**: Next.js Route Handlers in TypeScript, handling authentication, role-based authorization guards, input validation, and local vector embeddings via `@huggingface/transformers`.
-- **Data & Vector Storage Tier**: Containerized PostgreSQL 16 on port 5433 with native `pgvector` and full-text search extensions.
+- **Application & API Tier**: Next.js Route Handlers in TypeScript, handling authentication, role-based authorization guards, input validation, and local vector embeddings via `@huggingface/transformers`. Node.js runtime version is pinned via repository `.nvmrc`.
+- **Data & Vector Storage Tier**: Containerized PostgreSQL 16 on port 5433 using Docker image `pgvector/pgvector:0.7.0-pg16` with native `pgvector` and full-text search extensions. Connections from the API and test suites operate under a restricted database role `app_user` (granted `SELECT`/`INSERT`/`UPDATE`/`DELETE` on operational tables, `SELECT`/`INSERT` only on `audit_log`, and denied `TRUNCATE` and `TRIGGER` rights).
 
 ```mermaid
 graph TD
@@ -215,20 +215,32 @@ Our test strategy incorporates three distinct levels of verification:
 - **TC-TRG-03 (Direct Balance Update Guard)**: Direct `UPDATE grant_account SET current_balance = ...` from an application query is rejected.
 - **TC-TRG-04 (Account Insert Balance Initialization)**: Inserting a `grant_account` with an arbitrary `current_balance` ignores that value and sets `current_balance = budget_allocated`.
 - **TC-TRG-05 (Allocation Shift Balance Adjustment)**: Updating `budget_allocated` on a `grant_account` adjusts `current_balance` by the exact delta, and raises an error if the balance would drop below zero.
-- **TC-TRG-06 (Immutable Account ID)**: Attempting to `UPDATE expenditure SET account_id = ...` is rejected.
+- **TC-TRG-06 (Immutable Account ID & Grant ID)**:
+  - Attempting to `UPDATE expenditure SET account_id = ...` is rejected.
+  - Attempting to `UPDATE expenditure SET submitted_by = ...` is rejected.
+  - Attempting to `UPDATE grant_account SET grant_id = ...` is rejected.
 - **TC-TRG-07 (Amount Edit in Pending Only)**: Attempting to `UPDATE expenditure SET amount = ...` on an `APPROVED` or `REJECTED` expenditure is rejected.
-- **TC-TRG-08 (Illegal Status Transitions)**:
+- **TC-TRG-08 (Decided Rows Frozen)**: Attempting to modify `description`, `approved_by`, `decision_date`, or `rejection_reason` on an already decided row (`APPROVED` or `REJECTED`) without changing status is rejected.
+- **TC-TRG-09 (Illegal Status Transitions & Approver Role)**:
+  - `INSERT` of an expenditure with status `APPROVED` or non-null approval fields is rejected.
+  - Transitioning an expenditure to `APPROVED` or `REJECTED` with a non-`ADMIN` `approved_by` user ID is rejected.
   - `REJECTED -> APPROVED` is rejected.
   - `REJECTED -> PENDING` is rejected.
   - `APPROVED -> PENDING` is rejected.
-- **TC-TRG-09 (Direct Status Update Maintains Balance)**: Running a direct `UPDATE expenditure SET status = 'APPROVED', approved_by = 1, decision_date = NOW() WHERE transaction_id = ...` deducts the balance from `grant_account` through the AFTER UPDATE trigger.
-- **TC-TRG-10 (Reversion Restores Balance)**: Transitioning an expenditure from `APPROVED` to `REJECTED` restores the exact amount to `grant_account.current_balance`.
-- **TC-TRG-11 (Inactive Grant Submissions)**: Submitting an expenditure against a `CLOSED` or `SUSPENDED` grant is rejected.
-- **TC-TRG-12 (Date Lifespan Validation)**: Submitting an expenditure outside the grant active dates is rejected.
-- **TC-TRG-13 (Non-PI Submission)**: Non-PI faculty submitting expenditure against another faculty's grant is rejected.
-- **TC-TRG-14 (Audit Log Immutability)**: Any `UPDATE` or `DELETE` statement against `audit_log` is rejected with an exception.
-- **TC-TRG-15 (Audit Log Submission Tracking)**: Inserting an expenditure creates a `CREATED` audit entry with the submitting faculty's user ID recorded in `changed_by`.
-- **TC-TRG-16 (FTS Synchronization)**: Inserting an intellectual property disclosure auto-populates `tsv` with weighted title and abstract lexemes.
+  - Approving an already `APPROVED` expenditure via `approve_expenditure()` is rejected.
+  - Rejecting an already `REJECTED` expenditure via `reject_or_revert_expenditure()` is rejected.
+- **TC-TRG-10 (Direct Status Update Maintains Balance)**: Running a direct `UPDATE expenditure SET status = 'APPROVED', approved_by = 1, decision_date = NOW() WHERE transaction_id = ...` deducts the balance from `grant_account` through the AFTER UPDATE trigger.
+- **TC-TRG-11 (Reversion Restores Balance)**: Transitioning an expenditure from `APPROVED` to `REJECTED` restores the exact amount to `grant_account.current_balance`.
+- **TC-TRG-12 (Inactive Grant Submissions)**: Submitting an expenditure against a `CLOSED` or `SUSPENDED` grant is rejected.
+- **TC-TRG-13 (Date Lifespan Validation)**: Submitting an expenditure outside the grant active dates is rejected.
+- **TC-TRG-14 (Non-PI Submission)**: Non-PI faculty submitting expenditure against another faculty's grant is rejected.
+- **TC-TRG-15 (Audit Log Immutability)**:
+  - Any `UPDATE` statement against `audit_log` is rejected with an exception.
+  - Any `DELETE` statement against `audit_log` is rejected with an exception.
+  - Any `TRUNCATE audit_log` statement is rejected with an exception.
+- **TC-TRG-16 (Audit Log Submission Tracking)**: Inserting an expenditure creates a `CREATED` audit entry with the submitting faculty's user ID recorded in `changed_by`.
+- **TC-TRG-17 (FTS Synchronization)**: Inserting an intellectual property disclosure auto-populates `tsv` with weighted title and abstract lexemes.
+- **TC-TRG-18 (App User Role Execution)**: All database integrity tests are also verified when executing under the limited `app_user` database role.
 
 ### 4.3 Transaction & Concurrency Tests (`tests/db/transactions.test.ts`)
 - **TC-TX-01**: Atomic approval decreases `grant_account.current_balance` by the exact expenditure amount.

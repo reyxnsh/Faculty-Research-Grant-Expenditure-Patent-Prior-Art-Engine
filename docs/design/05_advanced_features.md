@@ -108,6 +108,11 @@ BEGIN
         NEW.current_balance := NEW.budget_allocated;
         RETURN NEW;
     ELSIF TG_OP = 'UPDATE' THEN
+        -- Block changing parent grant_id
+        IF NEW.grant_id <> OLD.grant_id THEN
+            RAISE EXCEPTION 'grant_id on account % cannot be changed', OLD.account_id;
+        END IF;
+
         -- Block direct changes to current_balance from application queries
         IF NEW.current_balance <> OLD.current_balance AND pg_trigger_depth() <= 1 THEN
             RAISE EXCEPTION 'Direct update of current_balance on account % is prohibited', OLD.account_id;
@@ -180,6 +185,11 @@ BEGIN
             NEW.submitted_by, v_grant_code;
     END IF;
 
+    -- Enforce initial state on submission
+    IF NEW.status <> 'PENDING' OR NEW.approved_by IS NOT NULL OR NEW.decision_date IS NOT NULL OR NEW.rejection_reason IS NOT NULL THEN
+        RAISE EXCEPTION 'New expenditure must be submitted with status PENDING and NULL approval fields';
+    END IF;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -194,19 +204,38 @@ EXECUTE FUNCTION fn_validate_expenditure_submission();
 
 ### 1.5 Trigger 5: Expenditure State Transition & Immutability Guard
 - **Purpose**:
-  1. Guarantees that `account_id` cannot be changed after submission.
+  1. Guarantees that `account_id` and `submitted_by` cannot be changed after submission.
   2. Guarantees that `amount` can only be changed while the expenditure is `PENDING`.
-  3. Enforces legal status transitions: `PENDING -> APPROVED`, `PENDING -> REJECTED`, and `APPROVED -> REJECTED` (reversion). All other transitions raise an exception.
+  3. Freezes decided rows: if `OLD.status = NEW.status` and the expenditure is already decided (`APPROVED` or `REJECTED`), rejects any change to `amount`, `approved_by`, `decision_date`, `rejection_reason`, or `description`.
+  4. Enforces legal status transitions: `PENDING -> APPROVED`, `PENDING -> REJECTED`, and `APPROVED -> REJECTED` (reversion). All other transitions raise an exception.
+  5. Verifies that when an expenditure transitions to `APPROVED` or `REJECTED`, `NEW.approved_by` corresponds to an active user with the `ADMIN` role.
 - **Target Table**: `expenditure`
 - **Timing**: `BEFORE UPDATE ON expenditure`
 
 ```sql
 CREATE OR REPLACE FUNCTION fn_validate_expenditure_transition()
 RETURNS TRIGGER AS $$
+DECLARE
+    v_approver_role VARCHAR(20);
 BEGIN
-    -- account_id is strictly immutable
+    -- account_id and submitted_by are strictly immutable
     IF NEW.account_id <> OLD.account_id THEN
         RAISE EXCEPTION 'account_id on expenditure % cannot be changed', OLD.transaction_id;
+    END IF;
+
+    IF NEW.submitted_by <> OLD.submitted_by THEN
+        RAISE EXCEPTION 'submitted_by on expenditure % cannot be changed', OLD.transaction_id;
+    END IF;
+
+    -- If status is unchanged and the expenditure is already decided, freeze all business fields
+    IF OLD.status = NEW.status AND OLD.status <> 'PENDING' THEN
+        IF NEW.amount <> OLD.amount OR 
+           NEW.approved_by IS DISTINCT FROM OLD.approved_by OR 
+           NEW.decision_date IS DISTINCT FROM OLD.decision_date OR 
+           NEW.rejection_reason IS DISTINCT FROM OLD.rejection_reason OR 
+           NEW.description <> OLD.description THEN
+            RAISE EXCEPTION 'Expenditure % is already % and cannot be modified', OLD.transaction_id, OLD.status;
+        END IF;
     END IF;
 
     -- amount can only be edited while PENDING
@@ -214,7 +243,7 @@ BEGIN
         RAISE EXCEPTION 'Amount on expenditure % cannot be modified once %', OLD.transaction_id, OLD.status;
     END IF;
 
-    -- Enforce legal status transitions
+    -- Enforce legal status transitions and verify admin approver
     IF OLD.status <> NEW.status THEN
         IF OLD.status = 'PENDING' AND NEW.status IN ('APPROVED', 'REJECTED') THEN
             NULL; -- Allowed
@@ -223,6 +252,15 @@ BEGIN
         ELSE
             RAISE EXCEPTION 'Illegal status transition for expenditure %: cannot change from % to %',
                 OLD.transaction_id, OLD.status, NEW.status;
+        END IF;
+
+        -- Approver must be an active ADMIN
+        SELECT role INTO v_approver_role
+        FROM users
+        WHERE user_id = NEW.approved_by AND is_active = TRUE;
+
+        IF v_approver_role IS NULL OR v_approver_role <> 'ADMIN' THEN
+            RAISE EXCEPTION 'Authorization failure: Approver (user ID %) must be an active ADMIN', NEW.approved_by;
         END IF;
     END IF;
 
@@ -334,8 +372,18 @@ BEGIN
             'EXPENDITURE',
             NEW.transaction_id,
             'STATUS_CHANGE_' || NEW.status,
-            jsonb_build_object('status', OLD.status, 'amount', OLD.amount),
-            jsonb_build_object('status', NEW.status, 'amount', NEW.amount),
+            jsonb_build_object(
+                'status', OLD.status, 
+                'amount', OLD.amount,
+                'approved_by', OLD.approved_by,
+                'decision_date', OLD.decision_date
+            ),
+            jsonb_build_object(
+                'status', NEW.status, 
+                'amount', NEW.amount,
+                'approved_by', NEW.approved_by,
+                'decision_date', NEW.decision_date
+            ),
             NEW.approved_by,
             COALESCE(NEW.rejection_reason, 'Status changed from ' || OLD.status || ' to ' || NEW.status)
         );
@@ -354,21 +402,26 @@ EXECUTE FUNCTION fn_audit_expenditure_lifecycle();
 ---
 
 ### 1.8 Trigger 8: Audit Log Immutability Guard
-- **Purpose**: Guarantees that `audit_log` records cannot be updated or deleted by any user or application process.
+- **Purpose**: Guarantees that `audit_log` records cannot be updated, deleted, or truncated by any application process.
 - **Target Table**: `audit_log`
-- **Timing**: `BEFORE UPDATE OR DELETE ON audit_log`
+- **Timing**: `BEFORE UPDATE OR DELETE ON audit_log` (row-level) and `BEFORE TRUNCATE ON audit_log` (statement-level).
 
 ```sql
 CREATE OR REPLACE FUNCTION fn_audit_log_immutable()
 RETURNS TRIGGER AS $$
 BEGIN
-    RAISE EXCEPTION 'audit_log is append-only: updates and deletes are prohibited';
+    RAISE EXCEPTION 'audit_log is append-only: updates, deletes, and truncates are prohibited';
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_audit_log_immutable
 BEFORE UPDATE OR DELETE ON audit_log
 FOR EACH ROW
+EXECUTE FUNCTION fn_audit_log_immutable();
+
+CREATE TRIGGER trg_audit_log_truncate
+BEFORE TRUNCATE ON audit_log
+FOR EACH STATEMENT
 EXECUTE FUNCTION fn_audit_log_immutable();
 ```
 
@@ -399,7 +452,9 @@ EXECUTE FUNCTION fn_sync_ip_tsvector();
 
 ## 2. Stored Procedures & Transactional Entry Points
 
-Application Route Handlers call these stored functions as sanctioned entry points. They verify the user's `ADMIN` role, lock the target row, and update the expenditure status. The triggers on `expenditure` handle balance updates and audit logging.
+The project specification (rubric item 7) requires "Stored procedures/functions". In PostgreSQL, both `CREATE FUNCTION` and `CREATE PROCEDURE` are available. When called via Route Handlers, each function call executes inside its own atomic transaction. We design stored functions returning structured `JSONB` for direct querying via `SELECT approve_expenditure($1, $2);`, and provide equivalent `CREATE PROCEDURE` statements with `INOUT` parameters for environments utilizing SQL `CALL`.
+
+> **Security Note**: The administrator user ID (`p_admin_user_id`) passed to these routines must always be extracted on the server from the authenticated session/JWT cookie in the Next.js backend, never accepted from client-supplied request bodies.
 
 ### 2.1 Stored Function: `approve_expenditure`
 
@@ -436,7 +491,13 @@ BEGIN
         RAISE EXCEPTION 'Expenditure with transaction ID % does not exist', p_transaction_id;
     END IF;
 
-    -- 3. Update status to APPROVED (the trigger handles balance deduction and validations)
+    -- 3. Only PENDING claims may be approved
+    IF v_status <> 'PENDING' THEN
+        RAISE EXCEPTION 'Cannot approve: Expenditure % is currently % (only PENDING claims can be approved)',
+            p_transaction_id, v_status;
+    END IF;
+
+    -- 4. Update status to APPROVED (the trigger handles balance deduction and validations)
     UPDATE expenditure
     SET status = 'APPROVED',
         approved_by = p_admin_user_id,
@@ -444,7 +505,7 @@ BEGIN
         updated_at = CURRENT_TIMESTAMP
     WHERE transaction_id = p_transaction_id;
 
-    -- 4. Fetch the resulting balance after trigger execution
+    -- 5. Fetch the resulting balance after trigger execution
     SELECT current_balance INTO v_new_balance
     FROM grant_account
     WHERE account_id = v_account_id;
@@ -497,6 +558,11 @@ BEGIN
         RAISE EXCEPTION 'Expenditure with transaction ID % does not exist', p_transaction_id;
     END IF;
 
+    -- Cannot reject an already rejected claim
+    IF v_status = 'REJECTED' THEN
+        RAISE EXCEPTION 'Cannot reject: Expenditure % is already in REJECTED status', p_transaction_id;
+    END IF;
+
     -- Update expenditure to REJECTED (the trigger handles fund restoration if previously APPROVED)
     UPDATE expenditure
     SET status = 'REJECTED',
@@ -515,6 +581,23 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql;
+```
+
+### 2.3 Stored Procedure Variant (Callable via `CALL`)
+For database client workflows requiring the SQL standard `CALL` syntax:
+
+```sql
+CREATE OR REPLACE PROCEDURE approve_expenditure_proc(
+    p_transaction_id INT,
+    p_admin_user_id  INT,
+    INOUT p_result   JSONB DEFAULT NULL
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    p_result := approve_expenditure(p_transaction_id, p_admin_user_id);
+END;
+$$;
+```
 ```
 
 ---
@@ -637,7 +720,10 @@ GROUP BY f.faculty_id, f.full_name, f.email, f.designation, d.department_code;
 | `idx_grant_pi` | `grant_record(pi_faculty_id)` | B-Tree | Optimizes queries filtering grants by Principal Investigator. |
 | `idx_account_grant` | `grant_account(grant_id)` | B-Tree | Speeds up cascading joins and balance sums for accounts per grant. |
 | `idx_expenditure_account` | `expenditure(account_id)` | B-Tree | Accelerates joins and aggregates between accounts and expenses. |
+| `idx_expenditure_submitted_by` | `expenditure(submitted_by)` | B-Tree | Optimizes queries filtering claims by submitting faculty PI. |
 | `idx_expenditure_status_date` | `expenditure(status, transaction_date)` | B-Tree (Compound) | Optimizes admin approval dashboard queries filtering pending claims sorted by date. |
+| `idx_ip_author_faculty` | `ip_author(faculty_id)` | B-Tree | Speeds up reverse lookups finding publications authored by a faculty member. |
+| `idx_grant_ip_document` | `grant_ip(document_id)` | B-Tree | Speeds up reverse joins linking disclosures to funding grants. |
 | `idx_audit_entity` | `audit_log(entity_type, entity_id)` | B-Tree | Speeds up retrieval of audit trails for a specific transaction. |
 | `idx_ip_tsv_gin` | `intellectual_property(tsv)` | GIN | Enables fast English full-text search. |
 | `idx_ip_embedding_hnsw` | `intellectual_property(embedding vector_cosine_ops)` | HNSW | Powers approximate nearest neighbor semantic searches using cosine distance. |
@@ -648,7 +734,10 @@ CREATE INDEX idx_faculty_dept ON faculty (department_id);
 CREATE INDEX idx_grant_pi ON grant_record (pi_faculty_id);
 CREATE INDEX idx_account_grant ON grant_account (grant_id);
 CREATE INDEX idx_expenditure_account ON expenditure (account_id);
+CREATE INDEX idx_expenditure_submitted_by ON expenditure (submitted_by);
 CREATE INDEX idx_expenditure_status_date ON expenditure (status, transaction_date);
+CREATE INDEX idx_ip_author_faculty ON ip_author (faculty_id);
+CREATE INDEX idx_grant_ip_document ON grant_ip (document_id);
 CREATE INDEX idx_audit_entity ON audit_log (entity_type, entity_id);
 
 -- GIN Inverted Index for Full-Text Search
@@ -689,6 +778,7 @@ JOIN department d ON f.department_id = d.department_id
 WHERE e.status = 'PENDING'
 ORDER BY e.transaction_date ASC, e.amount DESC;
 ```
+*Expected seed data return*: Returns pending claims across active grants, displaying transaction ID, date, category, PI name, and department.
 
 ---
 
@@ -710,6 +800,7 @@ GROUP BY g.grant_id, g.grant_code, g.title, g.total_budget
 HAVING (SUM(ga.budget_allocated - ga.current_balance) / g.total_budget) >= 0.80
 ORDER BY burn_rate_pct DESC;
 ```
+*Expected seed data return*: Returns grants where total expenditures have reached or exceeded 80% of sanctioned funding.
 
 ---
 
@@ -730,6 +821,7 @@ JOIN grant_record g ON f.faculty_id = g.pi_faculty_id
 GROUP BY d.department_id, d.department_name
 ORDER BY total_funding_sanctioned DESC;
 ```
+*Expected seed data return*: Returns one summary row per academic department with total grants, total sanctioned funds, average grant size, and range.
 
 ---
 
@@ -748,6 +840,7 @@ LEFT JOIN grant_record g ON f.faculty_id = g.pi_faculty_id
 GROUP BY d.department_id, d.department_name, d.department_code
 ORDER BY funding_rank ASC;
 ```
+*Expected seed data return*: Returns an ordered list of departments ranked by total research funding received.
 
 ---
 
@@ -780,13 +873,17 @@ FROM faculty_funding ff, benchmark b
 WHERE ff.total_pi_funding > b.avg_pi_funding
 ORDER BY ff.total_pi_funding DESC;
 ```
+*Expected seed data return*: Returns faculty members whose cumulative PI grant funding exceeds the university departmental benchmark average.
 
 ---
 
-### Query 6: Correlated Subquery / `EXISTS` (Accounts with High Pending Claims)
-Demonstrates a correlated `EXISTS` subquery to locate grant accounts where pending claims threaten available balance.
+### Query 6: Correlated `EXISTS` & Scalar Subquery
+Demonstrates:
+(a) A plain correlated `EXISTS` identifying accounts that currently have at least one `PENDING` expenditure claim.
+(b) A correlated scalar subquery comparing the cumulative pending amount against `current_balance` to find accounts at risk of overdraft.
 
 ```sql
+-- 6a. Plain correlated EXISTS: Accounts with active pending claims
 SELECT 
     ga.account_id,
     g.grant_code,
@@ -799,16 +896,40 @@ WHERE EXISTS (
     FROM expenditure e
     WHERE e.account_id = ga.account_id
       AND e.status = 'PENDING'
-    HAVING SUM(e.amount) > ga.current_balance
 );
+
+-- 6b. Correlated scalar subquery: Accounts where pending sum exceeds available balance
+SELECT 
+    ga.account_id,
+    g.grant_code,
+    ga.category,
+    ga.current_balance,
+    (
+        SELECT COALESCE(SUM(e.amount), 0)
+        FROM expenditure e
+        WHERE e.account_id = ga.account_id
+          AND e.status = 'PENDING'
+    ) AS total_pending_claims
+FROM grant_account ga
+JOIN grant_record g ON ga.grant_id = g.grant_id
+WHERE (
+    SELECT COALESCE(SUM(e.amount), 0)
+    FROM expenditure e
+    WHERE e.account_id = ga.account_id
+      AND e.status = 'PENDING'
+) > ga.current_balance;
 ```
+*Expected seed data return*: Query 6a returns all accounts with unreviewed claims; Query 6b isolates accounts at immediate risk of overdraft.
 
 ---
 
-### Query 7: `IN` / `NOT IN` Subquery (Faculty Without Disclosures)
-Demonstrates a `NOT IN` subquery identifying faculty members who have not yet authored an intellectual property disclosure or paper.
+### Query 7: `NOT EXISTS` Subquery & Positive `IN` Subquery
+Demonstrates:
+(a) `NOT EXISTS` subquery identifying faculty without disclosures. Using `NOT EXISTS` is safer than `NOT IN` because if a subquery returns any `NULL` values, SQL three-valued logic causes `NOT IN` to evaluate to `UNKNOWN` and drop all rows, whereas `NOT EXISTS` evaluates existence cleanly row-by-row.
+(b) A positive `IN (subquery)` finding faculty members who are Principal Investigators of currently `ACTIVE` grants.
 
 ```sql
+-- 7a. NOT EXISTS: Faculty members who have not yet authored an IP disclosure
 SELECT 
     f.faculty_id,
     f.full_name,
@@ -816,9 +937,27 @@ SELECT
     d.department_code
 FROM faculty f
 JOIN department d ON f.department_id = d.department_id
-WHERE f.faculty_id NOT IN (
-    SELECT DISTINCT faculty_id 
-    FROM ip_author
+WHERE NOT EXISTS (
+    SELECT 1 
+    FROM ip_author ipa
+    WHERE ipa.faculty_id = f.faculty_id
 )
 ORDER BY f.full_name ASC;
+
+-- 7b. Positive IN subquery: Faculty currently acting as PI on active research grants
+SELECT 
+    f.faculty_id,
+    f.full_name,
+    f.email,
+    d.department_code
+FROM faculty f
+JOIN department d ON f.department_id = d.department_id
+WHERE f.faculty_id IN (
+    SELECT pi_faculty_id 
+    FROM grant_record 
+    WHERE status = 'ACTIVE'
+)
+ORDER BY f.full_name ASC;
+```
+*Expected seed data return*: Query 7a returns newly appointed faculty without disclosures; Query 7b returns faculty actively directing sanctioned research projects.
 ```

@@ -70,7 +70,7 @@ Represents budget category heads within a research grant.
 | Column Name | PostgreSQL Data Type | Constraints | Description |
 |---|---|---|---|
 | `account_id` | `INT` | `GENERATED ALWAYS AS IDENTITY`, `PRIMARY KEY` | Unique identifier for the grant account. |
-| `grant_id` | `INT` | `NOT NULL`, `FK -> grant_record(grant_id) ON DELETE CASCADE` | Grant to which this budget account belongs. |
+| `grant_id` | `INT` | `NOT NULL`, `FK -> grant_record(grant_id) ON DELETE CASCADE` | Grant to which this budget account belongs. Immutable once created. |
 | `category` | `VARCHAR(50)` | `NOT NULL`, `CHECK (category IN ('EQUIPMENT', 'TRAVEL', 'CONSUMABLES', 'MANPOWER', 'CONTINGENCY', 'OVERHEAD'))` | Category allocation head. |
 | `budget_allocated` | `NUMERIC(14, 2)` | `NOT NULL`, `CHECK (budget_allocated >= 0)` | Sanctioned budget allocated to this category. Changes shift `current_balance` by the same delta. |
 | `current_balance` | `NUMERIC(14, 2)` | `NOT NULL`, `CHECK (current_balance >= 0 AND current_balance <= budget_allocated)` | Remaining balance. Initialized to `budget_allocated` on insert. Maintained exclusively by database triggers; direct external updates are rejected. |
@@ -87,15 +87,15 @@ Tracks individual expenditure requests billed against specific grant accounts.
 |---|---|---|---|
 | `transaction_id` | `INT` | `GENERATED ALWAYS AS IDENTITY`, `PRIMARY KEY` | Unique identifier for the transaction. |
 | `account_id` | `INT` | `NOT NULL`, `FK -> grant_account(account_id) ON DELETE RESTRICT` | Account debited by this expense. Immutable once submitted. |
-| `submitted_by` | `INT` | `NOT NULL`, `FK -> faculty(faculty_id) ON DELETE RESTRICT` | Faculty PI who submitted the claim. |
-| `approved_by` | `INT` | `NULLABLE`, `FK -> users(user_id) ON DELETE RESTRICT` | Administrator who approved the claim. Must be NULL when PENDING, required when APPROVED. |
-| `amount` | `NUMERIC(12, 2)` | `NOT NULL`, `CHECK (amount > 0)` | Billed expense in INR. Editable only while in PENDING status. |
-| `description` | `TEXT` | `NOT NULL` | Description and justification for the expense. |
-| `invoice_reference` | `VARCHAR(100)` | `NULLABLE` | Bill or invoice number from the vendor. |
+| `submitted_by` | `INT` | `NOT NULL`, `FK -> faculty(faculty_id) ON DELETE RESTRICT` | Faculty PI who submitted the claim. Immutable once submitted. |
+| `approved_by` | `INT` | `NULLABLE`, `FK -> users(user_id) ON DELETE RESTRICT` | Administrator who approved the claim. Must be NULL when PENDING, required when APPROVED. Frozen once decided. |
+| `amount` | `NUMERIC(12, 2)` | `NOT NULL`, `CHECK (amount > 0)` | Billed expense in INR. Editable only while in PENDING status. Frozen once decided. |
+| `description` | `TEXT` | `NOT NULL` | Description and justification for the expense. Frozen once decided. |
+| `invoice_reference` | `VARCHAR(100)` | `NULLABLE` | Bill or invoice number from the vendor. Frozen once decided. |
 | `transaction_date` | `DATE` | `NOT NULL`, `DEFAULT CURRENT_DATE` | Date the expense was incurred. Must fall within the grant start and end dates. |
-| `status` | `VARCHAR(20)` | `NOT NULL`, `DEFAULT 'PENDING'`, `CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))` | Workflow state. Transitions enforced by trigger: PENDING->APPROVED, PENDING->REJECTED, APPROVED->REJECTED. |
-| `decision_date` | `TIMESTAMPTZ` | `NULLABLE` | Timestamp of approval or rejection. Must be NULL when PENDING, required when APPROVED or REJECTED. |
-| `rejection_reason` | `TEXT` | `NULLABLE` | Reason given by administrator if rejected. Required when REJECTED. |
+| `status` | `VARCHAR(20)` | `NOT NULL`, `DEFAULT 'PENDING'`, `CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))` | Workflow state. Must be PENDING on INSERT. Transitions enforced by trigger: PENDING->APPROVED, PENDING->REJECTED, APPROVED->REJECTED. |
+| `decision_date` | `TIMESTAMPTZ` | `NULLABLE` | Timestamp of approval or rejection. Must be NULL when PENDING, required when APPROVED or REJECTED. Frozen once decided. |
+| `rejection_reason` | `TEXT` | `NULLABLE` | Reason given by administrator if rejected. Required when REJECTED. Frozen once decided. |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL`, `DEFAULT CURRENT_TIMESTAMP` | Record creation timestamp. |
 | `updated_at` | `TIMESTAMPTZ` | `NOT NULL`, `DEFAULT CURRENT_TIMESTAMP` | Record last updated timestamp. |
 
@@ -131,7 +131,7 @@ Associative junction table establishing many-to-many authorship between faculty 
 | `is_corresponding` | `BOOLEAN` | `NOT NULL`, `DEFAULT FALSE` | Indicates whether this author is the corresponding author. |
 
 *Composite Primary Key*: `(document_id, faculty_id)`.
-*Uniqueness Constraint*: `UNIQUE (document_id, author_order)` prevents two authors having the same rank on a single document.
+*Uniqueness Constraint*: `UNIQUE (document_id, author_order) DEFERRABLE INITIALLY DEFERRED` ensures unique author positions while permitting in-transaction sequence reordering.
 
 ---
 
@@ -150,7 +150,7 @@ Associative junction table linking research grants to the intellectual property 
 ---
 
 ## 10. Table: `audit_log`
-Append-only log of domain events, status transitions, and administrator actions. Updates and deletes are blocked by a trigger.
+Append-only log of domain events, status transitions, and administrator actions. Updates, deletes, and truncates are blocked by triggers. Connected applications operate under a restricted `app_user` role holding only SELECT and INSERT privileges.
 
 | Column Name | PostgreSQL Data Type | Constraints | Description |
 |---|---|---|---|
@@ -158,7 +158,7 @@ Append-only log of domain events, status transitions, and administrator actions.
 | `entity_type` | `VARCHAR(50)` | `NOT NULL`, `DEFAULT 'EXPENDITURE'` | Name of the entity undergoing change. |
 | `entity_id` | `INT` | `NOT NULL` | Primary key value of the audited entity (e.g., `transaction_id`). |
 | `action` | `VARCHAR(50)` | `NOT NULL` | Action performed (`CREATED`, `STATUS_CHANGE_APPROVED`, `STATUS_CHANGE_REJECTED`). |
-| `old_state` | `JSONB` | `NULLABLE` | Snapshot of modified fields before the change. |
+| `old_state` | `JSONB` | `NULLABLE` | Snapshot of modified fields before the change (includes status, amount, approved_by, decision_date). |
 | `new_state` | `JSONB` | `NULLABLE` | Snapshot of modified fields after the change. |
 | `changed_by` | `INT` | `NULLABLE`, `FK -> users(user_id) ON DELETE RESTRICT` | Identifier of the user who initiated the change. For creation, records the submitting faculty's user where known. |
 | `timestamp` | `TIMESTAMPTZ` | `NOT NULL`, `DEFAULT CURRENT_TIMESTAMP` | Timestamp of the event. |

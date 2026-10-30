@@ -241,7 +241,7 @@ CREATE TABLE ip_author (
 
     PRIMARY KEY (document_id, faculty_id),
     CONSTRAINT chk_author_order_positive CHECK (author_order > 0),
-    CONSTRAINT uq_doc_author_order UNIQUE (document_id, author_order),
+    CONSTRAINT uq_doc_author_order UNIQUE (document_id, author_order) DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT fk_ipauthor_document 
         FOREIGN KEY (document_id) 
         REFERENCES intellectual_property (document_id) 
@@ -296,4 +296,34 @@ CREATE TABLE audit_log (
         ON DELETE RESTRICT 
         ON UPDATE CASCADE
 );
+
+-- ============================================================================
+-- INDEXES
+-- ============================================================================
+CREATE INDEX idx_faculty_dept ON faculty (department_id);
+CREATE INDEX idx_grant_pi ON grant_record (pi_faculty_id);
+CREATE INDEX idx_account_grant ON grant_account (grant_id);
+CREATE INDEX idx_expenditure_account ON expenditure (account_id);
+CREATE INDEX idx_expenditure_submitted_by ON expenditure (submitted_by);
+CREATE INDEX idx_expenditure_status_date ON expenditure (status, transaction_date);
+CREATE INDEX idx_ip_author_faculty ON ip_author (faculty_id);
+CREATE INDEX idx_grant_ip_document ON grant_ip (document_id);
+CREATE INDEX idx_audit_entity ON audit_log (entity_type, entity_id);
+
+CREATE INDEX idx_ip_tsv_gin ON intellectual_property USING gin (tsv);
+CREATE INDEX idx_ip_embedding_hnsw 
+ON intellectual_property 
+USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
 ```
+
+---
+
+## 4. Database Roles & Application Privileges
+
+To follow the principle of least privilege, the application backend and test suites connect to PostgreSQL using a dedicated application role (`app_user`), rather than the database owner or superuser:
+- `app_user` is granted `SELECT`, `INSERT`, `UPDATE`, `DELETE` on operational tables (`department`, `faculty`, `users`, `grant_record`, `grant_account`, `expenditure`, `intellectual_property`, `ip_author`, `grant_ip`).
+- On `audit_log`, `app_user` receives only `SELECT` and `INSERT` privileges. It is denied `UPDATE`, `DELETE`, and `TRUNCATE` privileges.
+- `app_user` has no `TRUNCATE` or `TRIGGER` administrative privileges on any table.
+- This role is created in the database migration scripts.
+
