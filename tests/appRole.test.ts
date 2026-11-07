@@ -282,4 +282,37 @@ describe('Restricted Application Database Role (grant_app)', () => {
     expect(auditTrig.rows[0].p).toBe(false);
     expect(auditRef.rows[0].p).toBe(false);
   });
+
+  it('permits SELECT on reporting views and EXECUTE on workflow routines for application role', async () => {
+    // 1. SELECT on analytical views
+    const v1 = await appClient.query('SELECT COUNT(*)::int AS cnt FROM v_grant_financial_summary');
+    expect(v1.rows[0].cnt).toBeGreaterThanOrEqual(0);
+
+    const v2 = await appClient.query('SELECT COUNT(*)::int AS cnt FROM v_department_expenditure_overview');
+    expect(v2.rows[0].cnt).toBeGreaterThanOrEqual(0);
+
+    const v3 = await appClient.query('SELECT COUNT(*)::int AS cnt FROM v_faculty_ip_portfolio');
+    expect(v3.rows[0].cnt).toBeGreaterThanOrEqual(0);
+
+    // 2. EXECUTE on search_ip_fulltext
+    const searchRes = await appClient.query('SELECT * FROM search_ip_fulltext($1, $2)', ['quantum', 5]);
+    expect(Array.isArray(searchRes.rows)).toBe(true);
+
+    // 3. System catalog check for function EXECUTE privilege
+    const routines = [
+      'approve_expenditure(integer,integer)',
+      'reject_or_revert_expenditure(integer,integer,text)',
+      'approve_expenditure_proc(integer,integer,jsonb)',
+      'reject_or_revert_expenditure_proc(integer,integer,text,jsonb)',
+      'search_ip_fulltext(text,integer)',
+    ];
+
+    for (const routine of routines) {
+      const privRes = await adminPool.query(
+        'SELECT has_function_privilege($1, $2, $3) AS has_exec',
+        [appUser, routine, 'EXECUTE']
+      );
+      expect(privRes.rows[0].has_exec).toBe(true);
+    }
+  });
 });

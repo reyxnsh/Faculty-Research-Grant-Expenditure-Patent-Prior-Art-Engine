@@ -8,6 +8,15 @@ This document details the advanced database features implemented in PostgreSQL 1
 
 By embedding domain validation directly into database triggers, the database acts as the single source of truth, preventing invalid states even if application layers or API calls are bypassed.
 
+### 1.0 Lock Acquisition Order & Deadlock Freedom Hierarchy
+To guarantee zero deadlocks across concurrent approval, reversion, and allocation workflows, all transactions adhere to a strict linear lock hierarchy:
+- **Level 1 (Top Level)**: `expenditure` row (locked first via `SELECT ... FOR UPDATE` in workflow functions such as `approve_expenditure` and `reject_or_revert_expenditure`).
+- **Level 2 (Middle Level)**: `grant_account` row (locked next via `SELECT ... FOR UPDATE OF ga` inside `fn_maintain_expenditure_balance`).
+- **Level 3 (Base Level)**: `grant_record` row (locked exclusively in `fn_check_grant_budget_ceiling` when modifying account budget allocations).
+
+No transaction or routine ever acquires locks in reverse order (e.g. `grant_account` then `expenditure`), eliminating lock-order inversion cycles.
+
+
 ### 1.1 Trigger 1: Grant Account Budget Allocation Ceiling Guard
 - **Purpose**: Enforces that the sum of `budget_allocated` across all accounts of a grant never exceeds the grant's `total_budget`.
 - **Target Table**: `grant_account`
@@ -216,7 +225,7 @@ EXECUTE FUNCTION fn_validate_expenditure_submission();
 CREATE OR REPLACE FUNCTION fn_validate_expenditure_transition()
 RETURNS TRIGGER AS $$
 DECLARE
-    v_approver_role VARCHAR(20);
+    v_approver RECORD;
 BEGIN
     -- account_id and submitted_by are strictly immutable
     IF NEW.account_id <> OLD.account_id THEN
@@ -254,13 +263,15 @@ BEGIN
                 OLD.transaction_id, OLD.status, NEW.status;
         END IF;
 
-        -- Approver must be an active ADMIN
-        SELECT role INTO v_approver_role
-        FROM users
-        WHERE user_id = NEW.approved_by AND is_active = TRUE;
+        -- Approver must be an active ADMIN user
+        SELECT is_active, role, faculty_id INTO v_approver FROM users WHERE user_id = NEW.approved_by;
+        IF NOT FOUND OR v_approver.role <> 'ADMIN' OR NOT v_approver.is_active THEN
+            RAISE EXCEPTION 'Approved_by user % must be an active ADMIN', NEW.approved_by;
+        END IF;
 
-        IF v_approver_role IS NULL OR v_approver_role <> 'ADMIN' THEN
-            RAISE EXCEPTION 'Authorization failure: Approver (user ID %) must be an active ADMIN', NEW.approved_by;
+        -- Separation of duties: approver cannot decide their own expenditure
+        IF v_approver.faculty_id IS NOT NULL AND v_approver.faculty_id = OLD.submitted_by THEN
+            RAISE EXCEPTION 'Separation of duties violation: an approver cannot decide their own expenditure';
         END IF;
     END IF;
 
@@ -273,6 +284,10 @@ BEFORE UPDATE ON expenditure
 FOR EACH ROW
 EXECUTE FUNCTION fn_validate_expenditure_transition();
 ```
+
+> **Note on Decision Attribution & Separation of Duties**:
+> 1. *Separation of Duties*: The transition trigger verifies that an approver user who is linked to a faculty profile cannot decide claims submitted by themselves (`v_approver.faculty_id = OLD.submitted_by`).
+> 2. *Decision Attribution*: The `approved_by` column on the `expenditure` table records the user ID of the administrator who made the latest decision (`APPROVED` or `REJECTED`). When a previously approved claim is subsequently reverted to `REJECTED`, the original approver is preserved in `audit_log.old_state` JSON, maintaining full historical attribution.
 
 ---
 
@@ -425,6 +440,8 @@ FOR EACH STATEMENT
 EXECUTE FUNCTION fn_audit_log_immutable();
 ```
 
+> **Note on Privilege Boundaries & Enforcement**: The append-only triggers on `audit_log` and balance-guard triggers on `grant_account` strictly protect database integrity against operations performed by the application role (`grant_app` / `app_user`). However, a database superuser or table owner could still bypass triggers (e.g., via `ALTER TABLE ... DISABLE TRIGGER` or setting `session_replication_role = 'replica'`). For this reason, the web application never connects using the database owner or superuser credentials; all application requests connect under the restricted application role where trigger execution is mandatory and unbypassable.
+
 ---
 
 ### 1.9 Trigger 9: Full-Text Search Vector Synchronization
@@ -454,7 +471,7 @@ EXECUTE FUNCTION fn_sync_ip_tsvector();
 
 The project specification (rubric item 7) requires "Stored procedures/functions". In PostgreSQL, both `CREATE FUNCTION` and `CREATE PROCEDURE` are available. When called via Route Handlers, each function call executes inside its own atomic transaction. We design stored functions returning structured `JSONB` for direct querying via `SELECT approve_expenditure($1, $2);`, and provide equivalent `CREATE PROCEDURE` statements with `INOUT` parameters for environments utilizing SQL `CALL`.
 
-> **Security Note**: The administrator user ID (`p_admin_user_id`) passed to these routines must always be extracted on the server from the authenticated session/JWT cookie in the Next.js backend, never accepted from client-supplied request bodies.
+> **Security Note on Caller Identity**: The stored functions and procedures take the acting administrator user ID (`p_admin_user_id`) as an explicit parameter. Because these routines execute with `SECURITY INVOKER`, they are called strictly from backend server code (such as API Route Handlers) that extracts and verifies the administrator ID from the authenticated session, never accepting caller identity from untrusted client request bodies.
 
 ### 2.1 Stored Function: `approve_expenditure`
 

@@ -40,7 +40,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         verbose: false,
       });
 
-      // Verify UP state: all 8 migrations present and domain tables created
+      // Verify UP state: all 13 migrations present and domain tables created
       const checkClient = new Client({
         user,
         password,
@@ -54,7 +54,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         const upMigRes = await checkClient.query(
           'SELECT name FROM pgmigrations ORDER BY id ASC'
         );
-        expect(upMigRes.rows.length).toBe(8);
+        expect(upMigRes.rows.length).toBe(13);
         expect(upMigRes.rows.map((r) => r.name)).toEqual([
           '001_enable_extensions',
           '002_department_faculty_users',
@@ -64,6 +64,11 @@ describe('Database Migrations (node-pg-migrate)', () => {
           '006_audit_log',
           '007_indexes',
           '008_application_role',
+          '009_integrity_triggers',
+          '010_workflow_routines',
+          '011_reporting_views',
+          '012_fulltext_search',
+          '013_application_role_permissions',
         ]);
 
         const tablesRes = await checkClient.query(`
@@ -83,6 +88,17 @@ describe('Database Migrations (node-pg-migrate)', () => {
         expect(tableNames).toContain('ip_author');
         expect(tableNames).toContain('grant_ip');
         expect(tableNames).toContain('audit_log');
+
+        const viewsRes = await checkClient.query(`
+          SELECT table_name
+          FROM information_schema.views
+          WHERE table_schema = 'public'
+          ORDER BY table_name;
+        `);
+        const viewNames = viewsRes.rows.map((r) => r.table_name);
+        expect(viewNames).toContain('v_grant_financial_summary');
+        expect(viewNames).toContain('v_department_expenditure_overview');
+        expect(viewNames).toContain('v_faculty_ip_portfolio');
       } finally {
         await checkClient.end();
       }
@@ -92,7 +108,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         databaseUrl: migDbUrl,
         dir: migrationsDir,
         direction: 'down',
-        count: 8,
+        count: 13,
         migrationsTable: 'pgmigrations',
         verbose: false,
       });
@@ -151,7 +167,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         const reUpMigRes = await reUpClient.query(
           'SELECT name FROM pgmigrations ORDER BY id ASC'
         );
-        expect(reUpMigRes.rows.length).toBe(8);
+        expect(reUpMigRes.rows.length).toBe(13);
       } finally {
         await reUpClient.end();
       }

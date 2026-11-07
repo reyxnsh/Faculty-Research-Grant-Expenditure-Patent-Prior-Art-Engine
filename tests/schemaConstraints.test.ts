@@ -48,7 +48,7 @@ describe('Schema Constraints & Referential Integrity', () => {
           [dept.rows[0].department_id]
         );
         const grant = await client.query(
-          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-CASCADE', 'Radiation Study', 'DST', $1, 100000, '2026-01-01', '2027-01-01') RETURNING grant_id",
+          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-CASCADE', 'Radiation Study', 'DST', $1, 100000, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days') RETURNING grant_id",
           [fac.rows[0].faculty_id]
         );
         const grantId = grant.rows[0].grant_id;
@@ -146,7 +146,7 @@ describe('Schema Constraints & Referential Integrity', () => {
       await withRollback(async (client) => {
         const dept = await client.query("INSERT INTO department (department_name, department_code) VALUES ('Aerospace', 'AERO') RETURNING department_id");
         const fac = await client.query("INSERT INTO faculty (department_id, full_name, email, designation) VALUES ($1, 'Dr. Von Braun', 'braun@univ.edu', 'Professor') RETURNING faculty_id", [dept.rows[0].department_id]);
-        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-AERO', 'Rocket Propulsion', 'ISRO', $1, 500000, '2026-01-01', '2027-01-01') RETURNING grant_id", [fac.rows[0].faculty_id]);
+        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-AERO', 'Rocket Propulsion', 'ISRO', $1, 500000, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days') RETURNING grant_id", [fac.rows[0].faculty_id]);
         const grantId = grant.rows[0].grant_id;
 
         await client.query("INSERT INTO grant_account (grant_id, category, budget_allocated, current_balance) VALUES ($1, 'TRAVEL', 50000, 50000)", [grantId]);
@@ -224,15 +224,15 @@ describe('Schema Constraints & Referential Integrity', () => {
         // Negative budget rejected
         await expectQueryError(
           client,
-          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-NEG', 'Negative', 'DST', $1, -100, '2026-01-01', '2027-01-01')",
+          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-NEG', 'Negative', 'DST', $1, -100, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days')",
           [facId],
           /chk_grant_budget_positive/i
         );
 
-        // Invalid date range rejected
+        // Invalid date range rejected (end_date < start_date)
         await expectQueryError(
           client,
-          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-DATES', 'Dates', 'DST', $1, 1000, '2027-01-01', '2026-01-01')",
+          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-DATES', 'Dates', 'DST', $1, 1000, CURRENT_DATE + INTERVAL '30 days', CURRENT_DATE - INTERVAL '30 days')",
           [facId],
           /chk_grant_dates/i
         );
@@ -240,7 +240,7 @@ describe('Schema Constraints & Referential Integrity', () => {
         // Invalid status enum rejected
         await expectQueryError(
           client,
-          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date, status) VALUES ('GR-STAT', 'Status', 'DST', $1, 1000, '2026-01-01', '2027-01-01', 'UNKNOWN')",
+          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date, status) VALUES ('GR-STAT', 'Status', 'DST', $1, 1000, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days', 'UNKNOWN')",
           [facId],
           /chk_grant_status/i
         );
@@ -269,9 +269,12 @@ describe('Schema Constraints & Referential Integrity', () => {
 
     it('validates grant_account budget allocation non-negative and balance in range', async () => {
       await withRollback(async (client) => {
+        // Disable triggers within transaction to prove check constraints directly
+        await client.query('ALTER TABLE grant_account DISABLE TRIGGER USER;');
+
         const dept = await client.query("INSERT INTO department (department_name, department_code) VALUES ('ME', 'ME') RETURNING department_id");
         const fac = await client.query("INSERT INTO faculty (department_id, full_name, email, designation) VALUES ($1, 'Dr. Watt', 'watt@univ.edu', 'Professor') RETURNING faculty_id", [dept.rows[0].department_id]);
-        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-ME', 'Steam Engine', 'SERB', $1, 100000, '2026-01-01', '2027-01-01') RETURNING grant_id", [fac.rows[0].faculty_id]);
+        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-ME', 'Steam Engine', 'SERB', $1, 100000, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days') RETURNING grant_id", [fac.rows[0].faculty_id]);
         const grantId = grant.rows[0].grant_id;
 
         // Negative budget rejected
@@ -302,10 +305,13 @@ describe('Schema Constraints & Referential Integrity', () => {
 
     it('validates expenditure state machine combinations (chk_expenditure_state)', async () => {
       await withRollback(async (client) => {
+        // Disable triggers within transaction to test CHECK constraints directly on direct inserts
+        await client.query('ALTER TABLE expenditure DISABLE TRIGGER USER;');
+
         const dept = await client.query("INSERT INTO department (department_name, department_code) VALUES ('CS', 'CS') RETURNING department_id");
         const fac = await client.query("INSERT INTO faculty (department_id, full_name, email, designation) VALUES ($1, 'Dr. Turing', 'turing@univ.edu', 'Professor') RETURNING faculty_id", [dept.rows[0].department_id]);
         const adminUser = await client.query("INSERT INTO users (email, password_hash, role) VALUES ('admin_exp@univ.edu', 'hash', 'ADMIN') RETURNING user_id");
-        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-CS', 'Computing Machines', 'SERB', $1, 200000, '2026-01-01', '2027-01-01') RETURNING grant_id", [fac.rows[0].faculty_id]);
+        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-CS', 'Computing Machines', 'SERB', $1, 200000, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days') RETURNING grant_id", [fac.rows[0].faculty_id]);
         const acc = await client.query("INSERT INTO grant_account (grant_id, category, budget_allocated, current_balance) VALUES ($1, 'EQUIPMENT', 100000, 100000) RETURNING account_id", [grant.rows[0].grant_id]);
 
         const facId = fac.rows[0].faculty_id;
@@ -412,12 +418,12 @@ describe('Schema Constraints & Referential Integrity', () => {
         // 3. grant_record.total_budget
         await expectQueryError(
           client,
-          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-NN', 'Null Budget', 'Agency', $1, NULL, '2026-01-01', '2027-01-01')",
+          "INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-NN', 'Null Budget', 'Agency', $1, NULL, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days')",
           [facId],
           /null value in column "total_budget"/i
         );
 
-        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-NN', 'Valid Grant', 'Agency', $1, 100000, '2026-01-01', '2027-01-01') RETURNING grant_id", [facId]);
+        const grant = await client.query("INSERT INTO grant_record (grant_code, title, funding_agency, pi_faculty_id, total_budget, start_date, end_date) VALUES ('GR-NN', 'Valid Grant', 'Agency', $1, 100000, CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days') RETURNING grant_id", [facId]);
         const grantId = grant.rows[0].grant_id;
         const acc = await client.query("INSERT INTO grant_account (grant_id, category, budget_allocated, current_balance) VALUES ($1, 'TRAVEL', 50000, 50000) RETURNING account_id", [grantId]);
         const accId = acc.rows[0].account_id;
