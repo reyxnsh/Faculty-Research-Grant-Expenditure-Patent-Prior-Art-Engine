@@ -39,13 +39,3 @@ Thumbs.db
 
 # Local caches (e.g. Hugging Face models)
 .cache/
-
-# Defensive entries
-.agent/
-.agents/
-.gemini/
-.antigravity/
-.cursor/
-.claude/
-AGENTS.md
-CLAUDE.md

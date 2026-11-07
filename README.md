@@ -11,19 +11,20 @@ A database-centric web application for university research administration. The p
 
 1. **Clone and enter the repository:**
    ```bash
-   cd Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine
+   git clone https://github.com/reyxnsh/Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine.git && cd Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine
    ```
 
 2. **Configure environment variables:**
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` and set secure credentials for the database.
+   Edit `.env` and configure both administrative database credentials and restricted application-role variables (`APP_DB_USER` and `APP_DB_PASSWORD`).
 
 3. **Start the database container:**
    ```bash
-   docker compose up -d
+   npm run db:up
    ```
+   This boots the PostgreSQL 16 container with `pgvector` and blocks until the container healthcheck passes.
 
 4. **Install dependencies:**
    ```bash
@@ -43,16 +44,16 @@ A database-centric web application for university research administration. The p
 
 ## Testing
 
-Run the test suite with Vitest:
+Run the automated test suite with Vitest:
 ```bash
 npm test
 ```
 
 ## Useful Commands
 
-- `npm run db:up`: Start the PostgreSQL container in the background
+- `npm run db:up`: Start the PostgreSQL container and wait for healthy status
 - `npm run db:down`: Stop the PostgreSQL container
-- `npm run db:reset`: Reset database volume and re-run migrations
+- `npm run db:reset`: Reset database volume, wait for healthy status, and re-run migrations
 - `npm run migrate:up`: Apply pending migrations
 - `npm run migrate:down`: Revert the last migration
 - `npm run lint`: Run ESLint checks

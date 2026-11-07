@@ -14,8 +14,8 @@
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d --wait && npm run migrate:up",
-    "migrate:up": "node-pg-migrate --envPath .env -m migrations up",
-    "migrate:down": "node-pg-migrate --envPath .env -m migrations down",
+    "migrate:up": "node-pg-migrate --no-verbose --envPath .env -m migrations up",
+    "migrate:down": "node-pg-migrate --no-verbose --envPath .env -m migrations down",
     "migrate:create": "node-pg-migrate -m migrations create"
   },
   "dependencies": {

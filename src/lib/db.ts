@@ -13,13 +13,15 @@ const REQUIRED_ENV_VARS = [
   'POSTGRES_PORT',
 ] as const;
 
-export function validateDbEnv(): {
+export interface DbConfig {
   user: string;
   password: string;
   database: string;
   host: string;
   port: number;
-} {
+}
+
+export function validateDbEnv(): DbConfig {
   const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(
@@ -48,7 +50,7 @@ const globalForDb = globalThis as unknown as {
 
 export function createPool(databaseOverride?: string): Pool {
   const config = validateDbEnv();
-  return new Pool({
+  const poolInstance = new Pool({
     user: config.user,
     password: config.password,
     database: databaseOverride ?? config.database,
@@ -58,13 +60,32 @@ export function createPool(databaseOverride?: string): Pool {
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
   });
+
+  poolInstance.on('error', (err) => {
+    console.error('Unexpected error on idle database client:', err.message);
+  });
+
+  return poolInstance;
 }
 
-export const pool: Pool = globalForDb.dbPool ?? createPool();
-
-if (process.env.NODE_ENV !== 'production') {
-  globalForDb.dbPool = pool;
+/**
+ * Returns the lazily initialized default connection pool.
+ */
+export function getPool(): Pool {
+  if (!globalForDb.dbPool) {
+    globalForDb.dbPool = createPool();
+  }
+  return globalForDb.dbPool;
 }
+
+// Lazy proxy export ensuring importing this module does not eagerly initialize the pool
+export const pool = new Proxy({} as Pool, {
+  get(_target, prop, receiver) {
+    const targetPool = getPool();
+    const value = Reflect.get(targetPool, prop, receiver);
+    return typeof value === 'function' ? value.bind(targetPool) : value;
+  },
+});
 
 export async function query<
   R extends QueryResultRow = QueryResultRow,
@@ -73,22 +94,30 @@ export async function query<
   text: string,
   params?: I
 ): Promise<QueryResult<R>> {
-  return pool.query<R>(text, params);
+  return getPool().query<R>(text, params);
 }
 
 export async function withTransaction<T>(
   callback: (client: PoolClient) => Promise<T>,
-  clientPool: Pool = pool
+  clientPool?: Pool
 ): Promise<T> {
-  const client = await clientPool.connect();
+  const targetPool = clientPool ?? getPool();
+  const client = await targetPool.connect();
   try {
     await client.query('BEGIN');
     const result = await callback(client);
     await client.query('COMMIT');
     return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
+  } catch (originalError) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error(
+        'Failed to rollback transaction:',
+        rollbackError instanceof Error ? rollbackError.message : rollbackError
+      );
+    }
+    throw originalError;
   } finally {
     client.release();
   }

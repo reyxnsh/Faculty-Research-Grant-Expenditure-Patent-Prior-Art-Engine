@@ -39,10 +39,10 @@ We do not use prefixes like `Type:` because the embedding model was pre-trained 
   The `all-MiniLM-L6-v2` model supports up to 256 WordPiece tokens. Academic abstracts typically state their technical novelty, methodology, and problem statement within the first 150 to 200 words. When generating embeddings, text exceeding 256 tokens is safely truncated during tokenization using `truncation: true, max_length: 256`. The full text remains preserved in the relational `abstract` column for user inspection.
 - **Local Model Caching for Offline Evaluation**:
   The model weights are downloaded once during initial setup and cached in a project-local directory (e.g. `.cache/transformers/`, excluded in `.gitignore`). This ensures that university demonstration sessions and test suites operate completely offline without external network dependencies.
-- **Node.js Runtime & WASM Fallback**:
-  The package's WebAssembly (WASM) fallback (`env.backends.onnx.wasm`) is to be verified in the Phase 1 smoke test if running on newer Node versions where native C++ bindings for `onnxruntime-node` are uncompiled.
+- **Node.js Runtime & Native Execution**:
+  The package executes via native `onnxruntime-node` bindings on Node 26 (targeting `cpu`/`dml` devices without requiring browser WebAssembly fallbacks).
 - **Seed Embeddings**:
-  Seed dataset embeddings are generated programmatically by a Node.js script in Phase 6 rather than hardcoded in raw SQL migration files.
+  Seed dataset embeddings are generated programmatically by a Node.js seed script for prior-art search rather than hardcoded in raw SQL migration files.
 
 ---
 

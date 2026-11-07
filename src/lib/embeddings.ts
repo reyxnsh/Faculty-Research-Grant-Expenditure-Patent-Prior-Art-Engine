@@ -1,23 +1,23 @@
 import { pipeline, env } from '@huggingface/transformers';
 import path from 'path';
 
-// Pinned model and vector specifications
-export const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
-export const EMBEDDING_DIMENSION = 384;
-
-// Single constant for pipeline and inference configuration ensuring consistency between stored and query vectors
+// Model specifications and pipeline inference configuration
 export const EMBEDDING_CONFIG = {
-  model: EMBEDDING_MODEL,
+  model: 'Xenova/all-MiniLM-L6-v2',
+  dimension: 384,
+  maxTokens: 256,
+  dtype: 'fp32' as const,
   cacheDir: path.resolve(process.cwd(), '.cache/transformers'),
   inferenceOptions: {
     pooling: 'mean' as const,
     normalize: true,
-    truncation: true,
-    max_length: 256,
   },
 } as const;
 
-// Configure Hugging Face environment cache
+export const EMBEDDING_MODEL = EMBEDDING_CONFIG.model;
+export const EMBEDDING_DIMENSION = EMBEDDING_CONFIG.dimension;
+
+// Point Hugging Face environment cache to project local directory
 env.cacheDir = EMBEDDING_CONFIG.cacheDir;
 
 type FeatureExtractionPipeline = Awaited<ReturnType<typeof pipeline<'feature-extraction'>>>;
@@ -27,7 +27,6 @@ let pipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
 
 /**
  * Returns or initializes the singleton feature-extraction pipeline.
- * Tries native onnxruntime execution, falling back to CPU execution if native bindings encounter constraints.
  */
 export async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
   if (pipelineInstance) {
@@ -40,26 +39,17 @@ export async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline>
 
   pipelinePromise = (async () => {
     try {
-      pipelineInstance = await pipeline('feature-extraction', EMBEDDING_CONFIG.model);
+      pipelineInstance = await pipeline('feature-extraction', EMBEDDING_CONFIG.model, {
+        dtype: EMBEDDING_CONFIG.dtype,
+      });
       return pipelineInstance;
-    } catch (primaryErr) {
-      console.warn(
-        'Primary embedding backend failed, attempting CPU fallback:',
-        primaryErr instanceof Error ? primaryErr.message : primaryErr
+    } catch (err) {
+      pipelinePromise = null;
+      throw new Error(
+        `Failed to initialize embedding pipeline (${EMBEDDING_CONFIG.model}): ${
+          err instanceof Error ? err.message : err
+        }`
       );
-      try {
-        pipelineInstance = await pipeline('feature-extraction', EMBEDDING_CONFIG.model, {
-          device: 'cpu',
-        });
-        return pipelineInstance;
-      } catch (fallbackErr) {
-        pipelinePromise = null;
-        throw new Error(
-          `Failed to initialize embedding pipeline with both native and CPU backends: ${
-            fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
-          }`
-        );
-      }
     }
   })();
 
@@ -68,10 +58,22 @@ export async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline>
 
 /**
  * Generates a 384-dimensional normalized embedding for input text.
+ * Applies explicit 256-token truncation via the model tokenizer to ensure
+ * consistency between stored disclosures and search queries.
  */
 export async function embed(text: string): Promise<number[]> {
   const pipe = await getEmbeddingPipeline();
-  const output = await pipe(text, EMBEDDING_CONFIG.inferenceOptions);
+
+  // Explicitly truncate input to maxTokens using the pipeline tokenizer
+  const tokens = await pipe.tokenizer(text, {
+    truncation: true,
+    max_length: EMBEDDING_CONFIG.maxTokens,
+  });
+  const truncatedText = pipe.tokenizer.decode(tokens.input_ids, {
+    skip_special_tokens: true,
+  });
+
+  const output = await pipe(truncatedText, EMBEDDING_CONFIG.inferenceOptions);
   return Array.from(output.data as Float32Array);
 }
 

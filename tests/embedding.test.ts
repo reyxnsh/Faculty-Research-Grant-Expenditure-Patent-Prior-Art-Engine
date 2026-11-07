@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { embed, EMBEDDING_CONFIG } from '@/lib/embeddings';
+import { embed, EMBEDDING_CONFIG, getEmbeddingPipeline } from '@/lib/embeddings';
 import { env, pipeline } from '@huggingface/transformers';
 
 function cosineSimilarity(vecA: number[], vecB: number[]): number {
@@ -60,6 +60,34 @@ describe('Embedding Engine (@huggingface/transformers)', () => {
     expect(simRelated).toBeGreaterThan(simUnrelated);
     expect(simRelated).toBeGreaterThan(0.5);
     expect(simUnrelated).toBeLessThan(0.3);
+  });
+
+  it('verifies explicit 256-token truncation matches text cut to 256 tokens', async () => {
+    const pipe = await getEmbeddingPipeline();
+    const tokenizer = pipe.tokenizer;
+
+    // Generate ~3000 words of technical text
+    const words: string[] = [];
+    for (let i = 0; i < 3000; i++) {
+      words.push(`novelty${i % 250} patent${i % 17} method${i % 31} system${i % 7}`);
+    }
+    const longText = words.join(' ');
+
+    // Cut text to exact 256 tokens using the tokenizer
+    const tokenized256 = await tokenizer(longText, {
+      truncation: true,
+      max_length: EMBEDDING_CONFIG.maxTokens,
+    });
+    const cutText = tokenizer.decode(tokenized256.input_ids, {
+      skip_special_tokens: true,
+    });
+
+    // Embed both through the same embed() function
+    const vecLong = await embed(longText);
+    const vecCut = await embed(cutText);
+
+    const sim = cosineSimilarity(vecLong, vecCut);
+    expect(sim).toBeGreaterThan(0.999);
   });
 
   it('loads successfully from local cache with remote model access disabled (offline mode)', async () => {
