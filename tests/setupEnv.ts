@@ -12,4 +12,5 @@ const user = process.env.POSTGRES_USER || 'grant_admin';
 const password = process.env.POSTGRES_PASSWORD || '';
 const host = process.env.POSTGRES_HOST || 'localhost';
 const port = process.env.POSTGRES_PORT || '5433';
-process.env.DATABASE_URL = `postgres://${user}:${password}@${host}:${port}/${process.env.POSTGRES_DB}`;
+const activeDb = process.env.POSTGRES_DB || `${baseDb}_test`;
+process.env.DATABASE_URL = `postgres://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(activeDb)}`;

@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 // Ensure environment variables are loaded
 dotenv.config();
 
-const REQUIRED_ENV_VARS = [
+const REQUIRED_ADMIN_VARS = [
   'POSTGRES_USER',
   'POSTGRES_PASSWORD',
   'POSTGRES_DB',
@@ -21,11 +21,11 @@ export interface DbConfig {
   port: number;
 }
 
-export function validateDbEnv(): DbConfig {
-  const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
+export function validateAdminDbEnv(): DbConfig {
+  const missing = REQUIRED_ADMIN_VARS.filter((key) => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(
-      `Missing required database environment variable(s): ${missing.join(', ')}`
+      `Missing required administrative database environment variable(s): ${missing.join(', ')}`
     );
   }
 
@@ -43,13 +43,27 @@ export function validateDbEnv(): DbConfig {
   };
 }
 
-// Global cache to maintain a single pool across hot reloads in development
+export function validateAppDbEnv(): DbConfig {
+  const adminConfig = validateAdminDbEnv();
+  const appUser = process.env.APP_DB_USER || adminConfig.user;
+  const appPassword = process.env.APP_DB_PASSWORD || adminConfig.password;
+
+  return {
+    user: appUser,
+    password: appPassword,
+    database: adminConfig.database,
+    host: adminConfig.host,
+    port: adminConfig.port,
+  };
+}
+
+// Global cache to maintain single pools across hot reloads in development
 const globalForDb = globalThis as unknown as {
-  dbPool?: Pool;
+  appDbPool?: Pool;
+  adminDbPool?: Pool;
 };
 
-export function createPool(databaseOverride?: string): Pool {
-  const config = validateDbEnv();
+export function createPool(config: DbConfig, databaseOverride?: string): Pool {
   const poolInstance = new Pool({
     user: config.user,
     password: config.password,
@@ -69,13 +83,29 @@ export function createPool(databaseOverride?: string): Pool {
 }
 
 /**
- * Returns the lazily initialized default connection pool.
+ * Returns the lazily initialized application runtime pool (connected via APP_DB_USER).
  */
-export function getPool(): Pool {
-  if (!globalForDb.dbPool) {
-    globalForDb.dbPool = createPool();
+export function getPool(databaseOverride?: string): Pool {
+  if (databaseOverride) {
+    return createPool(validateAppDbEnv(), databaseOverride);
   }
-  return globalForDb.dbPool;
+  if (!globalForDb.appDbPool) {
+    globalForDb.appDbPool = createPool(validateAppDbEnv());
+  }
+  return globalForDb.appDbPool;
+}
+
+/**
+ * Returns the lazily initialized administrative pool (used for migrations and administrative tests).
+ */
+export function getAdminPool(databaseOverride?: string): Pool {
+  if (databaseOverride) {
+    return createPool(validateAdminDbEnv(), databaseOverride);
+  }
+  if (!globalForDb.adminDbPool) {
+    globalForDb.adminDbPool = createPool(validateAdminDbEnv());
+  }
+  return globalForDb.adminDbPool;
 }
 
 // Lazy proxy export ensuring importing this module does not eagerly initialize the pool
