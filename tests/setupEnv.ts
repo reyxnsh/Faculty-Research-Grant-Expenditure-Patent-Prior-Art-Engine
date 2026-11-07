@@ -14,3 +14,7 @@ const host = process.env.POSTGRES_HOST || 'localhost';
 const port = process.env.POSTGRES_PORT || '5433';
 const activeDb = process.env.POSTGRES_DB || `${baseDb}_test`;
 process.env.DATABASE_URL = `postgres://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(activeDb)}`;
+
+if (!process.env.AUTH_SECRET || process.env.AUTH_SECRET.length < 32) {
+  process.env.AUTH_SECRET = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+}

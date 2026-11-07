@@ -54,7 +54,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         const upMigRes = await checkClient.query(
           'SELECT name FROM pgmigrations ORDER BY id ASC'
         );
-        expect(upMigRes.rows.length).toBe(13);
+        expect(upMigRes.rows.length).toBe(14);
         expect(upMigRes.rows.map((r) => r.name)).toEqual([
           '001_enable_extensions',
           '002_department_faculty_users',
@@ -69,6 +69,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
           '011_reporting_views',
           '012_fulltext_search',
           '013_application_role_permissions',
+          '014_user_authentication',
         ]);
 
         const tablesRes = await checkClient.query(`
@@ -108,7 +109,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         databaseUrl: migDbUrl,
         dir: migrationsDir,
         direction: 'down',
-        count: 13,
+        count: 14,
         migrationsTable: 'pgmigrations',
         verbose: false,
       });
@@ -167,7 +168,7 @@ describe('Database Migrations (node-pg-migrate)', () => {
         const reUpMigRes = await reUpClient.query(
           'SELECT name FROM pgmigrations ORDER BY id ASC'
         );
-        expect(reUpMigRes.rows.length).toBe(13);
+        expect(reUpMigRes.rows.length).toBe(14);
       } finally {
         await reUpClient.end();
       }

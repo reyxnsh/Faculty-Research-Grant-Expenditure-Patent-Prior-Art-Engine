@@ -36,13 +36,18 @@ Maintains credentials, session identities, and access control roles for system a
 | Column Name | PostgreSQL Data Type | Constraints | Description |
 |---|---|---|---|
 | `user_id` | `INT` | `GENERATED ALWAYS AS IDENTITY`, `PRIMARY KEY` | Unique identifier for the user account. |
-| `email` | `VARCHAR(255)` | `NOT NULL`, `UNIQUE (uq_user_email)` | User login username (institutional email). |
-| `password_hash` | `VARCHAR(255)` | `NOT NULL` | Password hash (bcrypt / argon2). |
+| `email` | `VARCHAR(255)` | `NOT NULL`, `UNIQUE (uq_user_email)`, `CHECK (chk_user_email_lowercase)` | User login username (institutional email, strictly lowercase). |
+| `password_hash` | `VARCHAR(255)` | `NOT NULL` | Password hash (Node.js crypto.scrypt with salt and parameters). |
 | `role` | `VARCHAR(20)` | `NOT NULL`, `CHECK (role IN ('ADMIN', 'FACULTY'))` | Role governing system permissions. |
 | `faculty_id` | `INT` | `NULLABLE`, `UNIQUE (uq_user_faculty)`, `FK -> faculty(faculty_id) ON DELETE RESTRICT` | Reference to faculty profile. Must be non-null when `role = 'FACULTY'`. Each faculty profile links to at most one user account. |
 | `is_active` | `BOOLEAN` | `NOT NULL`, `DEFAULT TRUE` | Indicates whether the account is active. Users are deactivated, never deleted. |
+| `failed_login_count` | `INT` | `NOT NULL`, `DEFAULT 0`, `CHECK (failed_login_count >= 0)` | Consecutive failed authentication attempts; triggers lockout at 5. |
+| `locked_until` | `TIMESTAMPTZ` | `NULLABLE` | Timestamp until which the account is temporarily locked due to excessive failed attempts. |
+| `last_login_at` | `TIMESTAMPTZ` | `NULLABLE` | Timestamp of the most recent successful authentication. |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL`, `DEFAULT CURRENT_TIMESTAMP` | Account creation timestamp. |
 | `updated_at` | `TIMESTAMPTZ` | `NOT NULL`, `DEFAULT CURRENT_TIMESTAMP` | Last profile update timestamp. |
+
+*Table-level constraints*: `chk_faculty_role_link` ensures `FACULTY` accounts link to a faculty profile, `chk_failed_login_count_nonnegative` ensures counter is non-negative, and `chk_user_email_lowercase` enforces canonical lowercasing.
 
 ---
 

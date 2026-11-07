@@ -92,14 +92,21 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 │       ├── 05_advanced_features.md
 │       ├── 06_vector_design.md
 │       └── 07_architecture.md
-├── sql/
-│   ├── migrations/                    # Database DDL migration scripts
-│   │   ├── 001_initial_schema.sql
-│   │   ├── 002_triggers_and_procedures.sql
-│   │   ├── 003_views_and_indexes.sql
-│   │   └── 004_full_text_search.sql
-│   └── seeds/
-│       └── seed_data.sql              # University research seed dataset
+├── migrations/                        # Node-pg-migrate DDL scripts (001 through 014)
+│   ├── 001_enable_extensions.sql
+│   ├── 002_department_faculty_users.sql
+│   ├── 003_grant_account.sql
+│   ├── 004_expenditure.sql
+│   ├── 005_intellectual_property.sql
+│   ├── 006_audit_log.sql
+│   ├── 007_indexes.sql
+│   ├── 008_application_role.sql
+│   ├── 009_integrity_triggers.sql
+│   ├── 010_workflow_routines.sql
+│   ├── 011_reporting_views.sql
+│   ├── 012_fulltext_search.sql
+│   ├── 013_application_role_permissions.js
+│   └── 014_user_authentication.sql
 ├── src/
 │   ├── app/                           # Next.js App Router pages and APIs
 │   │   ├── api/                       # Backend Route Handlers
@@ -150,20 +157,20 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 │   │       └── embedder.ts            # @huggingface/transformers wrapper
 │   └── types/                         # TypeScript interfaces
 │       └── db.ts
-└── tests/
-    ├── db/                            # Vitest database constraint & trigger tests
-    │   ├── constraints.test.ts
-    │   ├── triggers.test.ts
-    │   ├── transactions.test.ts
-    │   └── queries.test.ts
-    ├── api/                           # Vitest API route integration tests
-    │   ├── auth.test.ts
-    │   ├── expenditures.test.ts
-    │   └── vector_search.test.ts
-    └── e2e/                           # Playwright end-to-end browser tests
-        ├── auth_flow.spec.ts
-        ├── expenditure_workflow.spec.ts
-        └── prior_art_search.spec.ts
+└── tests/                             # Vitest automated test suite
+    ├── connection.test.ts             # Pool connectivity tests
+    ├── health.test.ts                 # Health endpoint smoke tests
+    ├── helpers.test.ts                # Test harness rollback verification
+    ├── pgvector.test.ts               # pgvector extension verification
+    ├── schemaStructure.test.ts        # Table structures & column types
+    ├── schemaConstraints.test.ts      # Domain CHECK & UNIQUE constraints
+    ├── schemaIndexes.test.ts          # Index coverage & optimization
+    ├── appRole.test.ts                # Application role least-privilege security
+    ├── databaseLogic.test.ts          # Triggers, routines, views, and FTS
+    ├── concurrency.test.ts            # Lock serialization & race conditions
+    ├── embedding.test.ts              # Local ONNX transformer embeddings
+    ├── migrations.test.ts             # Up/down migration lifecycle verification
+    └── auth.test.ts                   # Auth, RBAC, lockout & API endpoints
 ```
 
 ---
@@ -175,6 +182,8 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 | `POST` | `/api/auth/login` | Public | Authenticates user; issues HTTP-only session cookie. | `{ email, password }` | `200 OK` `{ user: { id, email, role } }` |
 | `POST` | `/api/auth/logout` | Authenticated | Clears session cookie and invalidates session. | None | `200 OK` `{ success: true }` |
 | `GET` | `/api/auth/me` | Authenticated | Returns current authenticated user profile and role. | None | `200 OK` `{ user: { ... } }` |
+| `GET` | `/api/admin/users` | ADMIN | Lists user accounts without password hashes. | None | `200 OK` `[ { user_id, email, role, faculty_id, is_active, ... } ]` |
+| `POST` | `/api/admin/users` | ADMIN | Creates a new user account (faculty or admin). | `{ email, password, role, faculty_id }` | `201 Created` `{ user: { user_id, email, role, faculty_id } }` |
 | `GET` | `/api/grants` | ADMIN, FACULTY | Lists grants. `ADMIN` sees all; `FACULTY` sees only grants where they are PI. | Query: `?status=ACTIVE` | `200 OK` `[ { grant_id, grant_code, title, ... } ]` |
 | `POST` | `/api/grants` | ADMIN | Creates a new research grant record. | `{ grant_code, title, agency, pi_id, budget, start, end }` | `201 Created` `{ grant_id, ... }` |
 | `GET` | `/api/grants/[id]` | ADMIN, FACULTY | Fetches grant details and line-item accounts. | Path: `id` | `200 OK` `{ grant: { ... }, accounts: [ ... ] }` |
@@ -186,6 +195,50 @@ Faculty-Research-Grant-Expenditure-Patent-Prior-Art-Engine/
 | `POST` | `/api/prior-art/search` | ADMIN, FACULTY | Embeds draft text and returns ranked prior art. | `{ text, limit, doc_type }` | `200 OK` `[ { document_id, title, similarity_score, authors, grants } ]` |
 | `GET` | `/api/reports/financial-summary` | ADMIN | Returns aggregated grant utilization view. | Query: `?agency=DST` | `200 OK` `[ { grant_code, sanctioned, spent, ... } ]` |
 | `GET` | `/api/reports/department-overview` | ADMIN | Returns department-level spend overview. | None | `200 OK` `[ { department_code, total_sanctioned, total_spent } ]` |
+
+### 3.1 Authentication, Atomic Lockout & Security Invariants
+
+1. **Password Hashing**: Uses Node.js built-in `crypto.scrypt` with salt size of 16 bytes, derived key length of 64 bytes, and parameters $N=16384$, $r=8$, $p=1$. Cost parameters are stored in each hash and validated against strict safety bounds ($N \in [2^{10}, 2^{20}]$ power of two, $r \in [1, 16]$, $p \in [1, 4]$) before verification.
+2. **Atomic Lockout State Machine**: Failed authentication increments `failed_login_count` using a single atomic `UPDATE ... RETURNING` statement. At 5 consecutive failures, `locked_until` is set to 15 minutes in the future. Once the lockout duration has elapsed, any subsequent failure automatically restarts the counter at 1 and clears the expired lock. Successful login resets the counter to 0 and clears `locked_until`.
+3. **Session Management**: Session tokens are signed using `jose` pinned strictly to `HS256` algorithm. Tokens are stored in an `httpOnly`, `SameSite=Lax`, `Secure` cookie with a configurable TTL.
+4. **Input Limits & Payload Guard**: All mutating endpoints enforce a maximum payload limit of 64 KB (rejecting oversized payloads with HTTP 413). Input strings enforce strict boundaries (passwords $\le 256$, emails $\le 255$, descriptions $\le 2000$, invoice references $\le 100$). Oversized passwords fail validation immediately, bypassing expensive cryptographic operations.
+
+### 3.2 Database Exception Mapping to Safe Client Responses
+
+> **CSRF Protection & Content-Type Requirement**: All mutating HTTP requests (`POST`, `PUT`, `PATCH`, `DELETE`) are strictly validated against CSRF origin rules. Every non-GET request must carry `Content-Type: application/json`, even for requests without a body (such as approval and logout endpoints). Mutating requests lacking this header are rejected with HTTP 403 Forbidden.
+
+Backend Route Handlers map domain exceptions raised by database triggers and stored routines to clean HTTP status codes, strictly preventing database table names, SQL statements, or internal constraint identifiers from leaking to clients:
+
+| Function / Routine | Trigger | Exact Exception Message Pattern | HTTP Status | Safe Client Response |
+|---|---|---|:---:|---|
+| `fn_check_grant_budget_ceiling` | `trg_check_grant_budget_ceiling` | `Target grant with ID % does not exist` | `404 Not Found` | `{ "error": "Requested entity was not found" }` |
+| `fn_check_grant_budget_ceiling` | `trg_check_grant_budget_ceiling` | `Allocation violation: Total allocated (%) exceeds sanctioned grant budget (%)` | `409 Conflict` | `{ "error": "Budget allocation ceiling exceeded" }` |
+| `fn_check_grant_total_budget_decrease` | `trg_check_grant_total_budget_decrease` | `Cannot reduce total budget to %: Allocated accounts sum to %` | `409 Conflict` | `{ "error": "Cannot reduce budget below allocated accounts" }` |
+| `fn_grant_account_balance_guard` | `trg_grant_account_balance_guard` | `grant_id on account % cannot be changed` | `400 Bad Request` | `{ "error": "Account allocation cannot be modified" }` |
+| `fn_grant_account_balance_guard` | `trg_grant_account_balance_guard` | `Direct update of current_balance on account % is prohibited` | `403 Forbidden` | `{ "error": "Direct modification of account balance is prohibited" }` |
+| `fn_grant_account_balance_guard` | `trg_grant_account_balance_guard` | `Budget reduction of % would cause negative balance on account % (current balance %)` | `409 Conflict` | `{ "error": "Budget reduction would cause negative account balance" }` |
+| `fn_validate_expenditure_submission` | `trg_validate_expenditure_submission` | `Invalid account ID %: Parent grant account not found` | `404 Not Found` | `{ "error": "Requested entity was not found" }` |
+| `fn_validate_expenditure_submission` | `trg_validate_expenditure_submission` | `Expenditure rejected: Grant % is currently % (only ACTIVE grants accept expenses)` | `403 Forbidden` | `{ "error": "Claims can only be submitted for active grants" }` |
+| `fn_validate_expenditure_submission` | `trg_validate_expenditure_submission` | `Expenditure rejected: Transaction date (%) falls outside grant active window (% to %)` | `400 Bad Request` | `{ "error": "Transaction date falls outside the active grant window" }` |
+| `fn_validate_expenditure_submission` | `trg_validate_expenditure_submission` | `Expenditure rejected: Submitting faculty ID % is not the Principal Investigator for grant %` | `403 Forbidden` | `{ "error": "Only the Principal Investigator can submit claims for this grant" }` |
+| `fn_validate_expenditure_submission` | `trg_validate_expenditure_submission` | `New expenditure must be submitted with status PENDING and NULL approval fields` | `400 Bad Request` | `{ "error": "New claims must be submitted in pending status" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `account_id on expenditure % cannot be changed` | `400 Bad Request` | `{ "error": "Claim account cannot be modified" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `submitted_by on expenditure % cannot be changed` | `400 Bad Request` | `{ "error": "Claim submitter cannot be modified" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `Expenditure % is already % and cannot be modified` | `409 Conflict` | `{ "error": "Decided claims cannot be modified" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `Amount on expenditure % cannot be modified once %` | `409 Conflict` | `{ "error": "Amount cannot be modified on decided claims" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `Illegal status transition for expenditure %: cannot change from % to %` | `409 Conflict` | `{ "error": "Illegal status transition for claim" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `Approved_by user % must be an active ADMIN` | `403 Forbidden` | `{ "error": "Administrative role required for this action" }` |
+| `fn_validate_expenditure_transition` | `trg_validate_expenditure_transition` | `Separation of duties violation: an approver cannot decide their own expenditure` | `403 Forbidden` | `{ "error": "An approver cannot decide their own claim" }` |
+| `fn_maintain_expenditure_balance` | `trg_maintain_expenditure_balance` | `Cannot approve expenditure %: Associated grant is %` | `409 Conflict` | `{ "error": "Claim cannot be approved because the associated grant is not active" }` |
+| `fn_maintain_expenditure_balance` | `trg_maintain_expenditure_balance` | `Insufficient balance: Account % has %, requested %` | `409 Conflict` | `{ "error": "Insufficient account balance for this transaction" }` |
+| `fn_audit_log_immutable` | `trg_audit_log_immutable` | `audit_log is append-only: updates, deletes, and truncates are prohibited` | `403 Forbidden` | `{ "error": "Audit records are permanent and cannot be altered or removed" }` |
+| `approve_expenditure` | N/A | `Authorization failure: User % is not an active ADMIN` | `403 Forbidden` | `{ "error": "Administrative role required for this action" }` |
+| `approve_expenditure` | N/A | `Expenditure with transaction ID % does not exist` | `404 Not Found` | `{ "error": "Requested entity was not found" }` |
+| `approve_expenditure` | N/A | `Cannot approve: Expenditure % is currently % (only PENDING claims can be approved)` | `409 Conflict` | `{ "error": "Only pending claims can be approved" }` |
+| `reject_or_revert_expenditure` | N/A | `Rejection reason is required` | `400 Bad Request` | `{ "error": "Rejection reason is required" }` |
+| `reject_or_revert_expenditure` | N/A | `Authorization failure: User % is not an active ADMIN` | `403 Forbidden` | `{ "error": "Administrative role required for this action" }` |
+| `reject_or_revert_expenditure` | N/A | `Expenditure with transaction ID % does not exist` | `404 Not Found` | `{ "error": "Requested entity was not found" }` |
+| `reject_or_revert_expenditure` | N/A | `Cannot reject: Expenditure % is already in REJECTED status` | `409 Conflict` | `{ "error": "Claim is already rejected" }` |
 
 ---
 

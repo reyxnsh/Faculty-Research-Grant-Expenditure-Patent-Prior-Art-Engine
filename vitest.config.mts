@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
+    fileParallelism: false,
     globalSetup: path.resolve(import.meta.dirname, './tests/globalSetup.ts'),
     setupFiles: [path.resolve(import.meta.dirname, './tests/setupEnv.ts')],
     testTimeout: 60000,

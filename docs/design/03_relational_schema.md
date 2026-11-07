@@ -100,12 +100,17 @@ CREATE TABLE users (
     role                VARCHAR(20) NOT NULL,
     faculty_id          INT NULL,
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+    failed_login_count  INT NOT NULL DEFAULT 0,
+    locked_until        TIMESTAMPTZ NULL,
+    last_login_at       TIMESTAMPTZ NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT uq_user_email UNIQUE (email),
     CONSTRAINT uq_user_faculty UNIQUE (faculty_id),
     CONSTRAINT chk_user_role CHECK (role IN ('ADMIN', 'FACULTY')),
+    CONSTRAINT chk_failed_login_count_nonnegative CHECK (failed_login_count >= 0),
+    CONSTRAINT chk_user_email_lowercase CHECK (email = lower(email)),
     CONSTRAINT fk_user_faculty 
         FOREIGN KEY (faculty_id) 
         REFERENCES faculty (faculty_id) 

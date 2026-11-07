@@ -16,16 +16,19 @@
     "db:reset": "docker compose down -v && docker compose up -d --wait && npm run migrate:up",
     "migrate:up": "node-pg-migrate --no-verbose --envPath .env -m migrations up",
     "migrate:down": "node-pg-migrate --no-verbose --envPath .env -m migrations down",
-    "migrate:create": "node-pg-migrate -m migrations create"
+    "migrate:create": "node-pg-migrate -m migrations create",
+    "create-admin": "node scripts/createAdmin.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",
     "dotenv": "^18.0.9",
+    "jose": "^6.2.14",
     "next": "16.4.3",
     "node-pg-migrate": "^9.0.0",
     "pg": "^8.23.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
